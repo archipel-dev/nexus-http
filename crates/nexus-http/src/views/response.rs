@@ -1,15 +1,45 @@
 //! Response pane: status line, Preview (pretty + JSONPath filter), Raw,
 //! Headers, Cookies, Timeline and Tests tabs, and response history.
+//!
+//! Built only from archipel-kit. The six tabs are views of the same response, so they are a
+//! `SegmentedControl` (kit docs: "switching views"), not editor `TabBar` tabs.
+//! The body text itself still goes through `widgets::code_view` until the kit has a
+//! `CodeView`.
 
 use crate::state::{NexusState, Outcome, ResponseTab};
-use crate::theme::{Palette, mono, semibold};
-use crate::widgets::{
-    self, Icon, Syntax, caption, code_view, field_frame, pill, shortcut, tab_strip,
+use crate::widgets::{Syntax, code_view};
+use archipel_kit::behaviour::WidgetExt;
+use archipel_kit::components::{
+    Banner, Button, Cell, Column, Dropdown, EmptyState, IconButton, ListRow, ProgressBar,
+    SectionHeader, SegmentedControl, Severity, Spinner, Table, Tag, TextField, Tooltip,
+    TooltipExt, VirtualList,
 };
-use egui::{Align, CornerRadius, Layout, RichText, Sense, Ui, vec2};
+use archipel_kit::tokens::size;
+use archipel_kit::{Glyph, Tone, egui};
+use egui::Ui;
 use nexus_http_core::assertions::AssertionResult;
 use nexus_http_core::model::{Id, Protocol};
 use nexus_http_core::response::{BodyKind, Response, TimelineKind, format_duration, format_size};
+use std::fmt;
+
+/// One entry of the history dropdown; equal when it points at the same response.
+#[derive(Clone)]
+struct HistoryChoice {
+    index: usize,
+    text: String,
+}
+
+impl PartialEq for HistoryChoice {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+    }
+}
+
+impl fmt::Display for HistoryChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
+}
 
 #[derive(Default)]
 pub struct ResponseUi {
@@ -17,17 +47,54 @@ pub struct ResponseUi {
     /// Index into the request's history (0 = newest) when browsing old responses.
     pub history_index: Option<usize>,
     last_request: Option<Id>,
+    headers: TableState,
+    set_cookies: TableState,
+    jar: TableState,
+    timeline: TableState,
+    tests: Option<usize>,
+    events: Option<usize>,
+}
+
+/// Column widths (user-resizable) and the selected row of one kit `Table`.
+#[derive(Default)]
+pub(crate) struct TableState {
+    pub(crate) columns: Vec<Column>,
+    pub(crate) selected: Option<usize>,
+}
+
+impl TableState {
+    /// Creates the columns once, then lets the last one fill the width.
+    pub(crate) fn columns(&mut self, ui: &Ui, spec: &[(&str, f32, bool)]) -> (&mut [Column], &mut Option<usize>) {
+        if self.columns.is_empty() {
+            self.columns = spec
+                .iter()
+                .map(|&(title, width, mono)| {
+                    let column = Column::new(title, width);
+                    if mono { column.mono() } else { column }
+                })
+                .collect();
+        }
+        let others: f32 = self.columns.iter().rev().skip(1).map(|c| c.width).sum();
+        if let Some(last) = self.columns.last_mut() {
+            last.width = (ui.available_width() - others - 24.0).max(120.0);
+        }
+        (&mut self.columns, &mut self.selected)
+    }
+}
+
+/// Height left for a table's rows below its header.
+pub(crate) fn rows_height(ui: &Ui) -> f32 {
+    (ui.available_height() - size::HEADER_HEIGHT).max(size::ROW_HEIGHT * 3.0)
 }
 
 pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi) {
-    let pal = Palette::of(ui);
     let protocol = state
         .workspace
         .find_request(id)
         .map(|(_, r)| r.protocol)
         .unwrap_or_default();
     if !protocol.is_http() {
-        stream_view(ui, state, id, local, protocol, &pal);
+        stream_view(ui, state, id, local, protocol);
         return;
     }
     if local.last_request.as_ref() != Some(id) {
@@ -44,239 +111,213 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi
         None => state.outcome(id),
     };
 
-    // Header row (same height as the URL bar so both panes line up).
-    ui.add_space(10.0);
-    let header = ui.horizontal(|ui| {
-        ui.set_min_height(36.0);
-        ui.add_space(12.0);
+    let mut copy = false;
+    let mut save = false;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.add_space(size::CONTENT_INSET);
         if sending {
-            ui.add(egui::Spinner::new().size(14.0).color(pal.accent));
+            ui.add(Spinner::new().label("Sending"));
             let elapsed = state
                 .sending_elapsed()
                 .map(|d| d.as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
-            ui.label(
-                RichText::new(format!("Sending…  {}", format_duration(elapsed))).color(pal.weak),
-            );
+            ui.label(format!("Sending…  {}", format_duration(elapsed)));
             return;
         }
         match &outcome {
             Some(Outcome::Response(r, _)) => {
                 let label = format!("{} {}", r.status, r.reason);
-                pill(ui, label.trim(), pal.status(r.status), true);
-                ui.add_space(4.0);
-                pill(ui, &format_duration(r.timings.total_ms), pal.weak, false).on_hover_text(
-                    format!(
+                ui.add(Tag::new(label.trim()).tone(Tone::status(r.status)));
+                ui.add(Tag::new(format_duration(r.timings.total_ms)).tone(Tone::Secondary))
+                    .tooltip(format!(
                         "Prepare {}\nWaiting {}\nDownload {}",
                         format_duration(r.timings.prepare_ms),
                         format_duration(r.timings.wait_ms),
                         format_duration(r.timings.download_ms)
-                    ),
-                );
-                pill(ui, &format_size(r.body.len() as u64), pal.weak, false);
+                    ));
+                ui.add(Tag::new(format_size(r.body.len() as u64)).tone(Tone::Secondary));
                 if r.redirects > 0 {
-                    pill(
-                        ui,
-                        &format!(
+                    ui.add(
+                        Tag::new(format!(
                             "{} redirect{}",
                             r.redirects,
                             if r.redirects == 1 { "" } else { "s" }
-                        ),
-                        pal.purple,
-                        false,
+                        ))
+                        .tone(Tone::Link),
                     );
                 }
                 if r.truncated {
-                    pill(ui, "truncated", pal.warning, false);
+                    ui.add(Tag::new("truncated").tone(Tone::Warning));
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(10.0);
-                    history_menu(ui, state, id, local, &pal);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(size::CONTENT_INSET);
+                    save = ui
+                        .add(
+                            IconButton::new(Glyph::Save, "Save body to file")
+                                .with(Tooltip::new("Save body to file")),
+                        )
+                        .clicked();
+                    copy = ui
+                        .add(
+                            IconButton::new(Glyph::Copy, "Copy body")
+                                .with(Tooltip::new("Copy body")),
+                        )
+                        .clicked();
+                    history_picker(ui, state, id, local);
                 });
             }
             Some(Outcome::Error(_)) => {
-                pill(ui, "Error", pal.error, true);
+                ui.add(Tag::new("Error").tone(Tone::Error));
             }
             None => {}
         }
     });
     if sending {
-        widgets::busy_bar(ui, header.response.rect, pal.accent);
+        ui.add_space(4.0);
+        ui.add(ProgressBar::new(None).label("Sending request"));
         ui.ctx().request_repaint();
     }
     ui.add_space(4.0);
 
     let Some(outcome) = outcome else {
         if !sending {
-            idle(ui, &pal);
+            idle(ui);
         }
         return;
     };
     let (response, checks) = match outcome {
         Outcome::Error(message) => {
-            error_card(ui, &pal, &message);
+            error_card(ui, &message);
             return;
         }
         Outcome::Response(r, checks) => (r, checks),
     };
 
-    // Tabs
+    if copy {
+        ui.ctx().copy_text(response.body_text());
+        state.notify("Response body copied");
+    }
+    if save {
+        save_body(state, id, &response);
+    }
+
     let cookies = response.headers_named("set-cookie").count();
     let passed = checks.iter().filter(|c| c.passed).count();
     ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        tab_strip(
-            ui,
-            &mut state.response_tab,
-            &ResponseTab::ALL,
-            |t| t.label().to_owned(),
-            |t| match t {
-                ResponseTab::Headers => Some(response.headers.len().to_string()),
-                ResponseTab::Cookies if cookies > 0 => Some(cookies.to_string()),
+        ui.add_space(size::CONTENT_INSET);
+        let options = ResponseTab::ALL.map(|tab| {
+            let label = match tab {
+                ResponseTab::Headers => format!("{} ({})", tab.label(), response.headers.len()),
+                ResponseTab::Cookies if cookies > 0 => format!("{} ({cookies})", tab.label()),
                 ResponseTab::Tests if !checks.is_empty() => {
-                    Some(format!("{passed}/{}", checks.len()))
+                    format!("{} ({passed}/{})", tab.label(), checks.len())
                 }
-                _ => None,
-            },
-        );
+                _ => tab.label().to_owned(),
+            };
+            (tab, label)
+        });
+        ui.add(SegmentedControl::new(&mut state.response_tab, options));
     });
-    ui.painter()
-        .hline(ui.max_rect().x_range(), ui.cursor().top(), pal.hairline());
     ui.add_space(6.0);
 
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(12, 0))
+        .inner_margin(egui::Margin::symmetric(size::CONTENT_INSET as i8, 0))
         .show(ui, |ui| match state.response_tab {
-            ResponseTab::Preview => preview(ui, &response, local, &pal),
+            ResponseTab::Preview => preview(ui, &response, local),
+            // TODO(kit CodeView): replace with the kit CodeView when it lands.
             ResponseTab::Raw => code_view(ui, &response.body_text(), Syntax::Plain, "raw"),
-            ResponseTab::Headers => headers(ui, &response, &pal),
-            ResponseTab::Cookies => cookies_tab(ui, &response, state, &pal),
-            ResponseTab::Timeline => timeline(ui, &response, &pal),
-            ResponseTab::Tests => tests(ui, &checks, &pal),
+            ResponseTab::Headers => headers(ui, &response, local),
+            ResponseTab::Cookies => cookies_tab(ui, &response, state, local),
+            ResponseTab::Timeline => timeline(ui, &response, local),
+            ResponseTab::Tests => tests(ui, &checks, local),
         });
 }
 
-fn idle(ui: &mut Ui, pal: &Palette) {
-    ui.vertical_centered(|ui| {
-        ui.add_space((ui.available_height() / 3.5).max(16.0));
-        ui.label(
-            RichText::new("No response yet")
-                .size(16.0)
-                .color(pal.strong),
-        );
-        ui.add_space(14.0);
-        for (label, keys) in [
-            ("Send request", &["Ctrl", "Enter"][..]),
-            ("Focus URL", &["Ctrl", "L"]),
-            ("Switch request", &["Ctrl", "P"]),
-            ("Manage environments", &["Ctrl", "E"]),
-            ("New request", &["Ctrl", "N"]),
-        ] {
-            ui.horizontal(|ui| {
-                let w = 290.0;
-                ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-                ui.allocate_ui_with_layout(
-                    vec2(w, 24.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        let label_w = ui.label(RichText::new(label).color(pal.weak)).rect.width();
-                        ui.add_space(
-                            (w - label_w - widgets::shortcut_width(ui, keys) - 8.0).max(0.0),
-                        );
-                        shortcut(ui, keys);
-                    },
-                );
-            });
-        }
+fn save_body(state: &mut NexusState, id: &Id, response: &Response) {
+    let name = state
+        .workspace
+        .find_request(id)
+        .map(|(_, r)| r.name.clone())
+        .unwrap_or_else(|| "response".into());
+    let stem: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let ext = match response.body_kind() {
+        BodyKind::Json => "json",
+        BodyKind::Image | BodyKind::Binary => "bin",
+        _ => "txt",
+    };
+    let path = state.base_dir().join(format!("{stem}.response.{ext}"));
+    match std::fs::write(&path, &response.body) {
+        Ok(()) => state.notify(format!("Saved {}", path.display())),
+        Err(e) => state.notify(format!("Could not save the response: {e}")),
+    }
+}
+
+fn idle(ui: &mut Ui) {
+    EmptyState::new("No response yet")
+        .icon(Glyph::Send)
+        .hint("Send the request with Ctrl+Enter. Focus the URL with Ctrl+L, switch requests with Ctrl+P.")
+        .show(ui);
+}
+
+fn error_card(ui: &mut Ui, message: &str) {
+    ui.add_space(8.0);
+    let hint = if message.contains("undefined variable") {
+        "Define the variable in the environment (Ctrl+E) or fix its name."
+    } else if message.contains("could not connect") {
+        "Check the host and port, and whether a proxy is required (Settings)."
+    } else if message.contains("timed out") {
+        "Increase the timeout in the request's Settings tab."
+    } else if message.contains("certificate") {
+        "Turn off TLS verification for this request or add a CA certificate."
+    } else {
+        "Open the Timeline tab after a retry for the full exchange."
+    };
+    Banner::new(
+        Severity::Error,
+        format!("The request could not be completed: {message}"),
+    )
+    .show(ui);
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(size::CONTENT_INSET);
+        ui.label(hint);
     });
 }
 
-fn error_card(ui: &mut Ui, pal: &Palette, message: &str) {
-    ui.add_space(12.0);
-    egui::Frame::new()
-        .fill(pal.error.gamma_multiply(0.08))
-        .stroke(egui::Stroke::new(1.0_f32, pal.error.gamma_multiply(0.5)))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(14))
-        .outer_margin(egui::Margin::symmetric(12, 0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                RichText::new("The request could not be completed")
-                    .font(semibold(ui, 14.0))
-                    .color(pal.error),
-            );
-            ui.add_space(6.0);
-            ui.add(
-                egui::Label::new(RichText::new(message).font(mono(12.5)).color(pal.text)).wrap(),
-            );
-            ui.add_space(8.0);
-            let hint = if message.contains("undefined variable") {
-                "Define the variable in the environment (Ctrl+E) or fix its name."
-            } else if message.contains("could not connect") {
-                "Check the host and port, and whether a proxy is required (Settings)."
-            } else if message.contains("timed out") {
-                "Increase the timeout in the request's Settings tab."
-            } else if message.contains("certificate") {
-                "Turn off TLS verification for this request or add a CA certificate."
-            } else {
-                "Open the Timeline tab after a retry for the full exchange."
-            };
-            ui.label(RichText::new(hint).color(pal.weak));
-        });
-}
-
-fn history_menu(ui: &mut Ui, state: &NexusState, id: &Id, local: &mut ResponseUi, pal: &Palette) {
-    let count = state.history.for_request(id).count();
-    if count == 0 {
-        return;
-    }
-    let label = match local.history_index {
-        None | Some(0) => "Latest".to_owned(),
-        Some(i) => format!("{} of {count}", i + 1),
-    };
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label, egui::FontId::proportional(12.0), pal.weak);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 30.0, 24.0), Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), pal.hover);
-    }
-    ui.painter().galley(
-        egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        pal.weak,
-    );
-    widgets::paint_icon(
-        ui.painter(),
-        egui::Rect::from_center_size(
-            egui::pos2(rect.right() - 11.0, rect.center().y),
-            vec2(10.0, 10.0),
-        ),
-        Icon::Chevron(true),
-        pal.weak,
-    );
-    let resp = resp.on_hover_text("Response history");
-    egui::Popup::menu(&resp).width(240.0).show(|ui| {
-        for (i, r) in state.history.for_request(id).enumerate() {
-            let when = relative_time(r.started_at);
-            let text = RichText::new(format!(
-                "{}  {}  ·  {}  ·  {when}",
+fn history_picker(ui: &mut Ui, state: &NexusState, id: &Id, local: &mut ResponseUi) {
+    let choices: Vec<HistoryChoice> = state
+        .history
+        .for_request(id)
+        .enumerate()
+        .map(|(index, r)| HistoryChoice {
+            index,
+            text: format!(
+                "{} {} · {} · {}",
                 r.status,
                 r.reason,
-                format_duration(r.timings.total_ms)
-            ))
-            .size(12.0)
-            .color(pal.status(r.status));
-            if ui
-                .selectable_label(local.history_index.unwrap_or(0) == i, text)
-                .clicked()
-            {
-                local.history_index = (i > 0).then_some(i);
-            }
-        }
-    });
+                format_duration(r.timings.total_ms),
+                relative_time(r.started_at)
+            )
+            .replace("  ", " "),
+        })
+        .collect();
+    if choices.is_empty() {
+        return;
+    }
+    let mut current = choices[local.history_index.unwrap_or(0).min(choices.len() - 1)].clone();
+    let before = current.index;
+    ui.add(
+        Dropdown::new("response-history", &mut current, choices)
+            .label("Response history")
+            .width(250.0),
+    );
+    if current.index != before {
+        local.history_index = (current.index > 0).then_some(current.index);
+    }
 }
 
 fn relative_time(started_ms: u64) -> String {
@@ -294,190 +335,191 @@ fn relative_time(started_ms: u64) -> String {
     }
 }
 
-fn preview(ui: &mut Ui, response: &Response, local: &mut ResponseUi, pal: &Palette) {
+fn preview(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
     let kind = response.body_kind();
-    let filter_h = if kind == BodyKind::Json { 40.0 } else { 0.0 };
-    let body_h = ui.available_height() - filter_h;
-    ui.allocate_ui(vec2(ui.available_width(), body_h), |ui| match kind {
-        BodyKind::Empty => widgets::empty_state(ui, "Empty body", "The response has no content."),
+    let filter_h = if kind == BodyKind::Json { 64.0 } else { 0.0 };
+    let body_h = (ui.available_height() - filter_h).max(40.0);
+    ui.allocate_ui(egui::vec2(ui.available_width(), body_h), |ui| match kind {
+        BodyKind::Empty => {
+            EmptyState::new("Empty body")
+                .hint("The response has no content.")
+                .show(ui);
+        }
         BodyKind::Json => {
             match nexus_http_core::filter::filter_json_text(&response.body_text(), &local.filter) {
+                // TODO(kit CodeView): replace with the kit CodeView when it lands.
                 Ok(text) => code_view(ui, &text, Syntax::Json, "pretty"),
                 Err(e) => {
-                    ui.label(RichText::new(e).color(pal.warning));
+                    Banner::new(Severity::Warning, e).show(ui);
                 }
             }
         }
-        BodyKind::Image => widgets::empty_state(
-            ui,
-            "Image response",
-            &format!(
-                "{} · {}",
-                response.content_type().unwrap_or("image"),
-                format_size(response.body.len() as u64)
-            ),
-        ),
-        BodyKind::Binary => widgets::empty_state(
-            ui,
-            "Binary response",
-            &format!(
-                "{} of {}",
-                format_size(response.body.len() as u64),
-                response.content_type().unwrap_or("unknown type")
-            ),
-        ),
+        BodyKind::Image => {
+            EmptyState::new("Image response")
+                .icon(Glyph::Image)
+                .hint(format!(
+                    "{} · {}",
+                    response.content_type().unwrap_or("image"),
+                    format_size(response.body.len() as u64)
+                ))
+                .show(ui);
+        }
+        BodyKind::Binary => {
+            EmptyState::new("Binary response")
+                .icon(Glyph::File)
+                .hint(format!(
+                    "{} of {}",
+                    format_size(response.body.len() as u64),
+                    response.content_type().unwrap_or("unknown type")
+                ))
+                .show(ui);
+        }
+        // TODO(kit CodeView): replace with the kit CodeView when it lands.
         _ => code_view(ui, &response.body_text(), Syntax::Plain, "pretty-text"),
     });
     if kind == BodyKind::Json {
-        ui.add_space(6.0);
-        field_frame(pal).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                widgets::paint_icon(ui.painter(), r, Icon::Search, pal.weak);
-                ui.add(
-                    egui::TextEdit::singleline(&mut local.filter)
-                        .frame(false)
-                        .font(mono(12.5))
-                        .hint_text("Filter with JSONPath, e.g. $.items[*].name")
-                        .desired_width(ui.available_width()),
-                );
-            });
-        });
-    }
-}
-
-fn headers(ui: &mut Ui, response: &Response, pal: &Palette) {
-    egui::ScrollArea::vertical()
-        .id_salt("resp-headers")
-        .show(ui, |ui| {
-            egui::Grid::new("resp-headers-grid")
-                .num_columns(2)
-                .striped(true)
-                .spacing(vec2(18.0, 6.0))
-                .show(ui, |ui| {
-                    ui.label(RichText::new("Name").size(11.5).color(pal.weak));
-                    ui.label(RichText::new("Value").size(11.5).color(pal.weak));
-                    ui.end_row();
-                    for (name, value) in &response.headers {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(name).font(mono(12.5)).color(pal.syntax_key),
-                            )
-                            .selectable(true),
-                        );
-                        ui.add(
-                            egui::Label::new(RichText::new(value).font(mono(12.5)))
-                                .selectable(true)
-                                .wrap(),
-                        );
-                        ui.end_row();
-                    }
-                });
-        });
-}
-
-fn cookies_tab(ui: &mut Ui, response: &Response, state: &mut NexusState, pal: &Palette) {
-    let set: Vec<&str> = response.headers_named("set-cookie").collect();
-    if set.is_empty() {
-        caption(ui, "This response set no cookies");
-    } else {
-        caption(ui, "Set by this response");
         ui.add_space(4.0);
-        for raw in set {
-            ui.add(
-                egui::Label::new(RichText::new(raw).font(mono(12.5)))
-                    .selectable(true)
-                    .wrap(),
-            );
-        }
-    }
-    ui.add_space(14.0);
-    ui.horizontal(|ui| {
-        caption(
-            ui,
-            &format!("Workspace cookie jar · {}", state.jar.cookies.len()),
+        ui.add(
+            TextField::search(&mut local.filter)
+                .label("JSONPath filter")
+                .placeholder("e.g. $.items[*].name")
+                .monospace(true),
         );
-        if !state.jar.cookies.is_empty() && ui.small_button("Clear all").clicked() {
-            state.jar.clear();
+    }
+}
+
+fn headers(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
+    let height = rows_height(ui);
+    let state = &mut local.headers;
+    let (columns, selected) = state.columns(ui, &[("Name", 220.0, true), ("Value", 400.0, true)]);
+    Table::new(
+        "resp-headers",
+        columns,
+        response.headers.len(),
+        selected,
+    )
+    .name("Response headers")
+    .height(height)
+    .show(ui, |row, col| {
+        let (name, value) = &response.headers[row];
+        match col {
+            0 => Cell::new(name.as_str()).tone(Tone::Accent),
+            _ => Cell::new(value.as_str()),
         }
     });
-    ui.add_space(4.0);
-    egui::Grid::new("jar")
-        .num_columns(4)
-        .striped(true)
-        .spacing(vec2(16.0, 5.0))
-        .show(ui, |ui| {
-            for h in ["Name", "Value", "Domain", "Path"] {
-                ui.label(RichText::new(h).size(11.5).color(pal.weak));
-            }
-            ui.end_row();
-            for c in &state.jar.cookies {
-                ui.label(
-                    RichText::new(&c.name)
-                        .font(mono(12.5))
-                        .color(pal.syntax_key),
-                );
-                ui.label(RichText::new(&c.value).font(mono(12.5)));
-                ui.label(&c.domain);
-                ui.label(&c.path);
-                ui.end_row();
-            }
-        });
 }
 
-fn timeline(ui: &mut Ui, response: &Response, pal: &Palette) {
-    egui::ScrollArea::both()
-        .id_salt("timeline")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for entry in &response.timeline {
-                let (prefix, color) = match entry.kind {
-                    TimelineKind::Info => ("* ", pal.weak),
-                    TimelineKind::RequestHeader => ("> ", pal.info),
-                    TimelineKind::RequestBody => ("| ", pal.text),
-                    TimelineKind::ResponseHeader => ("< ", pal.success),
-                    TimelineKind::ResponseBody => ("| ", pal.text),
-                    TimelineKind::Error => ("! ", pal.error),
-                };
-                for line in entry.text.lines() {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("{prefix}{line}"))
-                                .font(mono(12.0))
-                                .color(color),
-                        )
-                        .selectable(true)
-                        .extend(),
-                    );
-                }
-            }
-        });
-}
-
-fn tests(ui: &mut Ui, checks: &[AssertionResult], pal: &Palette) {
-    if checks.is_empty() {
-        widgets::empty_state(
-            ui,
-            "No assertions",
-            "Add assertions in the request's Tests tab.",
-        );
+fn cookies_tab(ui: &mut Ui, response: &Response, state: &mut NexusState, local: &mut ResponseUi) {
+    let set: Vec<&str> = response.headers_named("set-cookie").collect();
+    ui.add(SectionHeader::new("Set by this response"));
+    if set.is_empty() {
+        ui.label("This response set no cookies");
+    } else {
+        let (columns, selected) = local.set_cookies.columns(ui, &[("Set-Cookie", 400.0, true)]);
+        Table::new(
+            "resp-set-cookies",
+            columns,
+            set.len(),
+            selected,
+        )
+        .name("Cookies set by this response")
+        .height((size::ROW_HEIGHT * set.len() as f32).min(120.0))
+        .show(ui, |row, _| Cell::new(set[row]));
+    }
+    ui.add(SectionHeader::new(format!(
+        "Workspace cookie jar · {}",
+        state.jar.cookies.len()
+    )));
+    if state.jar.cookies.is_empty() {
         return;
     }
-    for c in checks {
-        ui.horizontal(|ui| {
-            let (icon, color) = if c.passed {
-                (Icon::Check, pal.success)
-            } else {
-                (Icon::Close, pal.error)
-            };
-            let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-            widgets::paint_icon(ui.painter(), r, icon, color);
-            ui.label(&c.description);
-            if !c.passed {
-                ui.label(RichText::new(format!("got {}", c.actual)).color(pal.weak));
+    if ui.add(Button::ghost("Clear all").small(true)).clicked() {
+        state.jar.clear();
+        return;
+    }
+    let height = rows_height(ui);
+    let jar = &state.jar.cookies;
+    let (columns, selected) = local.jar.columns(
+        ui,
+        &[
+            ("Name", 160.0, true),
+            ("Value", 200.0, true),
+            ("Domain", 160.0, false),
+            ("Path", 120.0, false),
+        ],
+    );
+    Table::new("resp-jar", columns, jar.len(), selected)
+        .name("Cookie jar")
+        .height(height)
+        .show(ui, |row, col| {
+            let c = &jar[row];
+            match col {
+                0 => Cell::new(c.name.as_str()).tone(Tone::Accent),
+                1 => Cell::new(c.value.as_str()),
+                2 => Cell::new(c.domain.as_str()),
+                _ => Cell::new(c.path.as_str()),
             }
         });
+}
+
+fn timeline(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
+    let lines: Vec<(&str, Tone, &str)> = response
+        .timeline
+        .iter()
+        .flat_map(|entry| {
+            let (prefix, tone) = match entry.kind {
+                TimelineKind::Info => ("*", Tone::Secondary),
+                TimelineKind::RequestHeader => (">", Tone::Link),
+                TimelineKind::RequestBody => ("|", Tone::Default),
+                TimelineKind::ResponseHeader => ("<", Tone::Success),
+                TimelineKind::ResponseBody => ("|", Tone::Default),
+                TimelineKind::Error => ("!", Tone::Error),
+            };
+            entry.text.lines().map(move |line| (prefix, tone, line))
+        })
+        .collect();
+    let height = rows_height(ui);
+    let (columns, selected) = local.timeline.columns(ui, &[("Dir", 40.0, true), ("Message", 400.0, true)]);
+    Table::new(
+        "resp-timeline",
+        columns,
+        lines.len(),
+        selected,
+    )
+    .name("Timeline")
+    .height(height)
+    .show(ui, |row, col| {
+        let (prefix, tone, text) = lines[row];
+        match col {
+            0 => Cell::new(prefix).tone(tone),
+            _ => Cell::new(text).tone(tone),
+        }
+    });
+}
+
+fn tests(ui: &mut Ui, checks: &[AssertionResult], local: &mut ResponseUi) {
+    if checks.is_empty() {
+        EmptyState::new("No assertions")
+            .icon(Glyph::Test)
+            .hint("Add assertions in the request's Tests tab.")
+            .show(ui);
+        return;
     }
+    let height = ui.available_height().max(size::ROW_HEIGHT * 3.0);
+    VirtualList::new("resp-tests", checks.len(), &mut local.tests)
+        .name("Assertion results")
+        .height(height)
+        .show(ui, |i| {
+            let c = &checks[i];
+            let row = ListRow::new(&c.description);
+            if c.passed {
+                row.icon(Glyph::Check).icon_tone(Tone::Success)
+            } else {
+                row.icon(Glyph::Close)
+                    .icon_tone(Tone::Error)
+                    .secondary(format!("got {}", c.actual))
+            }
+        });
 }
 
 fn stream_view(
@@ -486,7 +528,6 @@ fn stream_view(
     id: &Id,
     local: &mut ResponseUi,
     protocol: Protocol,
-    pal: &Palette,
 ) {
     use nexus_http_core::stream::Direction;
     let connected = state.stream_connected(id);
@@ -495,19 +536,18 @@ fn stream_view(
         .get(id)
         .map(|s| s.events.as_slice())
         .unwrap_or(&[]);
-    ui.add_space(10.0);
+    ui.add_space(8.0);
     let mut clear = false;
     ui.horizontal(|ui| {
-        ui.set_min_height(36.0);
-        ui.add_space(12.0);
+        ui.add_space(size::CONTENT_INSET);
         if connected {
-            pill(ui, "Connected", pal.success, true);
+            ui.add(Tag::new("Connected").tone(Tone::Success));
         } else if events.is_empty() {
-            pill(ui, "Not connected", pal.weak, true);
+            ui.add(Tag::new("Not connected").tone(Tone::Secondary));
         } else if events.iter().any(|e| e.direction == Direction::Error) {
-            pill(ui, "Failed", pal.error, true);
+            ui.add(Tag::new("Failed").tone(Tone::Error));
         } else {
-            pill(ui, "Closed", pal.weak, true);
+            ui.add(Tag::new("Closed").tone(Tone::Secondary));
         }
         let received = events
             .iter()
@@ -517,16 +557,16 @@ fn stream_view(
             .iter()
             .filter(|e| e.direction == Direction::Outgoing)
             .count();
-        pill(ui, &format!("{received} received"), pal.weak, false);
+        ui.add(Tag::new(format!("{received} received")).tone(Tone::Secondary));
         if matches!(protocol, Protocol::WebSocket | Protocol::Grpc) {
-            pill(ui, &format!("{sent} sent"), pal.weak, false);
+            ui.add(Tag::new(format!("{sent} sent")).tone(Tone::Secondary));
         }
         if let Some(last) = events.last() {
-            pill(ui, &format_duration(last.at_ms), pal.weak, false);
+            ui.add(Tag::new(format_duration(last.at_ms)).tone(Tone::Secondary));
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(10.0);
-            if !events.is_empty() && widgets::secondary_button(ui, "Clear").clicked() {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(size::CONTENT_INSET);
+            if !events.is_empty() && ui.add(Button::secondary("Clear")).clicked() {
                 clear = true;
             }
         });
@@ -535,9 +575,6 @@ fn stream_view(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
-    ui.add_space(4.0);
-    ui.painter()
-        .hline(ui.max_rect().x_range(), ui.cursor().top(), pal.hairline());
     ui.add_space(8.0);
 
     if events.is_empty() {
@@ -548,130 +585,60 @@ fn stream_view(
             }
             _ => "Connect to stream events as they arrive.",
         };
-        widgets::empty_state(ui, &format!("{} stream", protocol.label()), hint);
+        EmptyState::new(format!("{} stream", protocol.label()))
+            .icon(Glyph::Plug)
+            .hint(hint)
+            .show(ui);
         return;
     }
-    let filter = local.filter.to_lowercase();
+    let needle = local.filter.to_lowercase();
+    let shown: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            needle.is_empty()
+                || e.data.to_lowercase().contains(&needle)
+                || e.label.to_lowercase().contains(&needle)
+        })
+        .collect();
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(12, 0))
+        .inner_margin(egui::Margin::symmetric(size::CONTENT_INSET as i8, 0))
         .show(ui, |ui| {
-            let list_h = ui.available_height() - 42.0;
-            egui::ScrollArea::vertical()
-                .id_salt("stream-events")
-                .auto_shrink([false, false])
-                .max_height(list_h)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for event in events.iter().filter(|e| {
-                        filter.is_empty()
-                            || e.data.to_lowercase().contains(&filter)
-                            || e.label.to_lowercase().contains(&filter)
-                    }) {
-                        let (icon_color, tint) = match event.direction {
-                            Direction::Incoming => (pal.success, pal.success.gamma_multiply(0.06)),
-                            Direction::Outgoing => (pal.info, pal.info.gamma_multiply(0.06)),
-                            Direction::Info => (pal.weak, egui::Color32::TRANSPARENT),
-                            Direction::Error => (pal.error, pal.error.gamma_multiply(0.08)),
-                        };
-                        egui::Frame::new()
-                            .fill(tint)
-                            .corner_radius(CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(8, 5))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal_top(|ui| {
-                                    let (r, _) =
-                                        ui.allocate_exact_size(vec2(14.0, 16.0), Sense::hover());
-                                    let c = r.center();
-                                    match event.direction {
-                                        Direction::Incoming => arrow(ui, c, false, icon_color),
-                                        Direction::Outgoing => arrow(ui, c, true, icon_color),
-                                        _ => {
-                                            ui.painter().circle_filled(c, 3.0, icon_color);
-                                        }
-                                    }
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{:>7}",
-                                            format_duration(event.at_ms)
-                                        ))
-                                        .font(mono(11.5))
-                                        .color(pal.faint),
-                                    );
-                                    if event.label != "message" {
-                                        pill(ui, &event.label, icon_color, false);
-                                    }
-                                    if let Some(eid) = &event.id {
-                                        ui.label(
-                                            RichText::new(format!("id {eid}"))
-                                                .size(11.5)
-                                                .color(pal.faint),
-                                        );
-                                    }
-                                    let pretty =
-                                        serde_json::from_str::<serde_json::Value>(&event.data)
-                                            .ok()
-                                            .filter(|v| v.is_object() || v.is_array())
-                                            .and_then(|v| serde_json::to_string(&v).ok());
-                                    let text = pretty.unwrap_or_else(|| event.data.clone());
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(text).font(mono(12.0)).color(
-                                                if event.direction == Direction::Info {
-                                                    pal.weak
-                                                } else {
-                                                    pal.text
-                                                },
-                                            ),
-                                        )
-                                        .wrap()
-                                        .selectable(true),
-                                    );
-                                });
-                            });
-                        ui.add_space(3.0);
+            let list_h = (ui.available_height() - 52.0).max(size::ROW_HEIGHT * 3.0);
+            VirtualList::new("stream-events", shown.len(), &mut local.events)
+                .name("Messages")
+                .height(list_h)
+                .show(ui, |i| {
+                    let event = shown[i];
+                    let (glyph, tone) = match event.direction {
+                        Direction::Incoming => (Glyph::ArrowDown, Tone::Success),
+                        Direction::Outgoing => (Glyph::ArrowUp, Tone::Link),
+                        Direction::Info => (Glyph::Info, Tone::Secondary),
+                        Direction::Error => (Glyph::Error, Tone::Error),
+                    };
+                    let text = serde_json::from_str::<serde_json::Value>(&event.data)
+                        .ok()
+                        .filter(|v| v.is_object() || v.is_array())
+                        .and_then(|v| serde_json::to_string(&v).ok())
+                        .unwrap_or_else(|| event.data.clone());
+                    let mut meta = format_duration(event.at_ms);
+                    if event.label != "message" {
+                        meta = format!("{meta} · {}", event.label);
+                    }
+                    if let Some(eid) = &event.id {
+                        meta = format!("{meta} · id {eid}");
+                    }
+                    let row = ListRow::new(text).icon(glyph).icon_tone(tone).secondary(meta);
+                    if event.direction == Direction::Error {
+                        row.label_tone(Tone::Error)
+                    } else {
+                        row
                     }
                 });
-            ui.add_space(6.0);
-            field_frame(pal).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                    widgets::paint_icon(ui.painter(), r, Icon::Search, pal.weak);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut local.filter)
-                            .frame(false)
-                            .hint_text("Filter events")
-                            .desired_width(ui.available_width()),
-                    );
-                });
-            });
+            ui.add_space(4.0);
+            ui.add(TextField::search(&mut local.filter).label("Filter events"));
         });
     if clear && let Some(s) = state.streams.get_mut(id) {
         s.events.clear();
+        local.events = None;
     }
-}
-
-fn arrow(ui: &Ui, c: egui::Pos2, up: bool, color: egui::Color32) {
-    let s = egui::Stroke::new(1.6_f32, color);
-    let (tip, tail, wing) = if up {
-        (-5.0, 5.0, -1.5)
-    } else {
-        (5.0, -5.0, 1.5)
-    };
-    ui.painter()
-        .line_segment([egui::pos2(c.x, c.y + tail), egui::pos2(c.x, c.y + tip)], s);
-    ui.painter().line_segment(
-        [
-            egui::pos2(c.x - 3.5, c.y + wing),
-            egui::pos2(c.x, c.y + tip),
-        ],
-        s,
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(c.x + 3.5, c.y + wing),
-            egui::pos2(c.x, c.y + tip),
-        ],
-        s,
-    );
 }

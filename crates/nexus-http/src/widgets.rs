@@ -333,7 +333,14 @@ pub fn code_editor(
 
 /// Read-only highlighted text (response viewer).
 pub fn code_view(ui: &mut Ui, text: &str, syntax: Syntax, id_salt: &str) {
-    let pal = Palette::of(ui);
+    let mut pal = Palette::of(ui);
+    // JSON value colors come from the kit theme (`parts::ValueKind`), like every data view.
+    let kit = |kind: archipel_kit::ValueKind| kind.resolve(ui.ctx());
+    pal.syntax_key = kit(archipel_kit::ValueKind::Key);
+    pal.syntax_string = kit(archipel_kit::ValueKind::String);
+    pal.syntax_number = kit(archipel_kit::ValueKind::Number);
+    pal.syntax_keyword = kit(archipel_kit::ValueKind::Boolean);
+    pal.syntax_punct = kit(archipel_kit::ValueKind::Punctuation);
     let vars = Map::new();
     egui::ScrollArea::both()
         .id_salt(id_salt)
@@ -347,7 +354,11 @@ pub fn code_view(ui: &mut Ui, text: &str, syntax: Syntax, id_salt: &str) {
             } else {
                 highlight_plain_json(text, &pal, syntax, &vars)
             };
-            ui.add(egui::Label::new(job).selectable(true).extend());
+            let text_label = ui.add(egui::Label::new(job).selectable(true).extend());
+            // The selectable label is focusable, so it needs an accessible name.
+            text_label.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Body text")
+            });
         });
 }
 

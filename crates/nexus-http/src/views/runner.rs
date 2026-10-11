@@ -2,15 +2,19 @@
 //! results with assertion details.
 
 use crate::state::NexusState;
-use crate::theme::{Palette, mono, semibold};
-use crate::widgets::{
-    self, Icon, caption, field_frame, paint_icon, pill, primary_button, secondary_button,
+use super::response::{TableState, rows_height};
+use archipel_kit::behaviour::WidgetExt;
+use archipel_kit::components::{
+    Button, Cell, Checkbox, Dropdown, EmptyState, IconButton, ListRow, ProgressBar, SectionHeader,
+    Spinner, Table, Tag, TextField, Tooltip, TooltipExt, VirtualList,
 };
-use egui::{Align, CornerRadius, Layout, RichText, Sense, Ui, pos2, vec2};
+use archipel_kit::tokens::{size, typography};
+use archipel_kit::{Glyph, Tone, egui};
+use egui::{Align, Layout, RichText, Ui};
 use nexus_http_core::Client;
 use nexus_http_core::cookies::CookieJar;
 use nexus_http_core::history::History;
-use nexus_http_core::model::{Id, Item, Method};
+use nexus_http_core::model::{Id, Item};
 use nexus_http_core::response::format_duration;
 use nexus_http_core::runner::{self, RunOptions, RunSummary, StepResult};
 use std::collections::HashSet;
@@ -38,8 +42,30 @@ pub struct RunnerUi {
     steps: Vec<StepResult>,
     summary: Option<RunSummary>,
     job: Option<Job>,
-    expanded: HashSet<usize>,
+    iterations_text: String,
+    plan_table: TableState,
+    results_table: TableState,
+    details: Option<usize>,
     elapsed: Option<Duration>,
+}
+
+/// One entry of the scope dropdown; equal when it names the same folder.
+#[derive(Clone)]
+struct Scope {
+    id: Option<Id>,
+    text: String,
+}
+
+impl PartialEq for Scope {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::fmt::Display for Scope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 impl RunnerUi {
@@ -86,7 +112,8 @@ impl RunnerUi {
         });
         self.steps.clear();
         self.summary = None;
-        self.expanded.clear();
+        self.details = None;
+        self.results_table.selected = None;
         self.elapsed = None;
         self.job = Some(Job {
             rx,
@@ -128,14 +155,9 @@ impl RunnerUi {
             state.jar = jar;
             state.mark_history_dirty();
             self.elapsed = Some(started.elapsed());
-            // Failures open expanded so their details are visible at once.
-            self.expanded = self
-                .steps
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| !s.passed())
-                .map(|(i, _)| i)
-                .collect();
+            // The first failure is selected so its details are visible at once.
+            self.results_table.selected = self.steps.iter().position(|s| !s.passed());
+            self.details = self.results_table.selected;
             self.summary = Some(summary);
             self.job = None;
         }
@@ -154,7 +176,6 @@ fn folders(items: &[Item], depth: usize, out: &mut Vec<(usize, Id, String)>) {
 }
 
 pub fn show(ui: &mut Ui, state: &mut NexusState, local: &mut RunnerUi, close: &mut bool) {
-    let pal = Palette::of(ui);
     if local.poll(state) {
         ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
@@ -168,256 +189,318 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, local: &mut RunnerUi, close: &m
         None => state.workspace.name.clone(),
     };
     let planned = runner::plan(&state.workspace, local.options.scope.as_ref());
+    let plural = if planned.len() == 1 { "" } else { "s" };
 
-    egui::Frame::new().inner_margin(egui::Margin::same(16)).show(ui, |ui| {
-        // Header
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Collection Runner").font(semibold(ui, 16.0)).color(pal.strong));
-            ui.label(RichText::new(format!("·  {scope_name}")).size(14.0).color(pal.weak));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::icon_button(ui, Icon::Close, pal.weak, "Back to requests").clicked() {
-                    *close = true;
-                }
-            });
-        });
-        ui.add_space(12.0);
-
-        // Options
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            caption(ui, "Run");
-            let mut scopes = vec![(0, None, format!("Whole workspace ({})", state.workspace.name))];
-            let mut list = Vec::new();
-            folders(&state.workspace.items, 0, &mut list);
-            scopes.extend(list.into_iter().map(|(d, id, name)| (d + 1, Some(id), name)));
-            egui::ComboBox::from_id_salt("runner-scope")
-                .selected_text(&scope_name)
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    for (depth, id, name) in scopes {
-                        let label = format!("{}{name}", "   ".repeat(depth));
-                        if ui.selectable_label(local.options.scope == id, label).clicked() {
-                            local.set_scope(id);
-                        }
+    egui::Frame::new()
+        .inner_margin(egui::Margin::same(16))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Collection Runner")
+                        .font(typography::semibold(ui.ctx(), 16.0)),
+                );
+                ui.label(RichText::new(format!("·  {scope_name}")).size(14.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            IconButton::new(Glyph::Close, "Back to requests")
+                                .with(Tooltip::new("Back to requests").shortcut("Esc")),
+                        )
+                        .clicked()
+                    {
+                        *close = true;
                     }
                 });
-            caption(ui, "Iterations");
-            ui.add(egui::DragValue::new(&mut local.options.iterations).range(1..=100));
-            caption(ui, "Delay (ms)");
-            if local.delay_text.is_empty() {
-                local.delay_text = local.options.delay.as_millis().to_string();
-            }
-            if ui.add(egui::TextEdit::singleline(&mut local.delay_text).desired_width(60.0)).changed() {
-                local.options.delay = Duration::from_millis(local.delay_text.trim().parse().unwrap_or(0));
-            }
-            ui.checkbox(&mut local.options.bail, "Stop on first failure");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if local.is_running() {
-                    if secondary_button(ui, "Stop").clicked() {
-                        local.stop();
+            });
+            ui.add_space(12.0);
+            options_row(ui, state, local, &scope_name, planned.len());
+            ui.add_space(12.0);
+
+            let total = local
+                .job
+                .as_ref()
+                .map(|j| j.planned)
+                .unwrap_or(local.steps.len())
+                .max(1);
+            let done = local.steps.len();
+            if local.is_running() {
+                ui.horizontal(|ui| {
+                    ui.add(Spinner::new().label("Running"));
+                    ui.label(format!("Running {done} of {total}…"));
+                });
+                ui.add_space(4.0);
+                ui.add(ProgressBar::new(Some(done as f32 / total as f32)).label("Run progress"));
+            } else if let Some(summary) = &local.summary {
+                ui.horizontal(|ui| {
+                    ui.add(Tag::new(format!("{} passed", summary.passed())).tone(Tone::Success));
+                    if summary.failed() > 0 {
+                        ui.add(
+                            Tag::new(format!("{} failed", summary.failed())).tone(Tone::Error),
+                        );
                     }
-                } else if primary_button(ui, &format!("Run {} request{}", planned.len(), if planned.len() == 1 { "" } else { "s" }), !planned.is_empty()).clicked() {
+                    let (ok, all) = summary.assertions();
+                    if all > 0 {
+                        ui.add(Tag::new(format!("{ok}/{all} assertions")).tone(Tone::Secondary));
+                    }
+                    let ms = local
+                        .elapsed
+                        .map(|d| d.as_secs_f64() * 1000.0)
+                        .unwrap_or(summary.total_ms());
+                    ui.add(Tag::new(format_duration(ms)).tone(Tone::Secondary));
+                    if summary.cancelled {
+                        ui.add(Tag::new("stopped").tone(Tone::Warning));
+                    }
+                });
+            } else {
+                ui.label(format!(
+                    "{} request{plural} will run in tree order. Responses feed {{% response %}} chaining like manual sends.",
+                    planned.len()
+                ));
+            }
+            ui.add_space(10.0);
+
+            if local.steps.is_empty() && !local.is_running() {
+                plan_table(ui, state, local, &planned);
+            } else {
+                results(ui, local);
+            }
+        });
+}
+
+fn options_row(
+    ui: &mut Ui,
+    state: &mut NexusState,
+    local: &mut RunnerUi,
+    scope_name: &str,
+    planned: usize,
+) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let running = local.is_running();
+
+        let mut scopes = vec![Scope {
+            id: None,
+            text: format!("Whole workspace ({})", state.workspace.name),
+        }];
+        let mut list = Vec::new();
+        folders(&state.workspace.items, 0, &mut list);
+        scopes.extend(list.into_iter().map(|(depth, id, name)| Scope {
+            id: Some(id),
+            text: format!("{}{name}", "  ".repeat(depth + 1)),
+        }));
+        let mut current = scopes
+            .iter()
+            .find(|s| s.id == local.options.scope)
+            .cloned()
+            .unwrap_or_else(|| scopes[0].clone());
+        let before = current.id.clone();
+        ui.add_enabled_ui(!running, |ui| {
+            ui.add(
+                Dropdown::new("runner-scope", &mut current, scopes)
+                    .label(format!("Run scope: {scope_name}"))
+                    .width(240.0),
+            );
+        });
+        if current.id != before {
+            local.set_scope(current.id);
+        }
+
+        if local.iterations_text.is_empty() {
+            local.iterations_text = local.options.iterations.to_string();
+        }
+        let parsed = local.iterations_text.trim().parse::<u32>();
+        let invalid = !matches!(parsed, Ok(1..=100));
+        let edit = ui.add(
+            TextField::new(&mut local.iterations_text)
+                .label("Iterations")
+                .error(invalid.then_some("1 to 100"))
+                .enabled(!running)
+                .width(80.0),
+        );
+        if edit.changed() && let Ok(n @ 1..=100) = local.iterations_text.trim().parse::<u32>() {
+            local.options.iterations = n;
+        }
+
+        if local.delay_text.is_empty() {
+            local.delay_text = local.options.delay.as_millis().to_string();
+        }
+        let delay = ui.add(
+            TextField::new(&mut local.delay_text)
+                .label("Delay (ms)")
+                .enabled(!running)
+                .width(90.0),
+        );
+        if delay.changed() {
+            local.options.delay =
+                Duration::from_millis(local.delay_text.trim().parse().unwrap_or(0));
+        }
+        ui.add_space(4.0);
+        ui.add_enabled(
+            !running,
+            Checkbox::new(&mut local.options.bail, "Stop on first failure"),
+        );
+        ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+            if running {
+                if ui.add(Button::secondary("Stop").icon(Glyph::Stop)).clicked() {
+                    local.stop();
+                }
+            } else {
+                let label = format!(
+                    "Run {planned} request{}",
+                    if planned == 1 { "" } else { "s" }
+                );
+                let run = ui.add(Button::primary(label).icon(Glyph::Run).enabled(planned > 0));
+                if planned == 0 {
+                    run.tooltip("This scope has no requests");
+                } else if run.clicked() {
                     state.flush();
                     local.start(state);
                 }
-            });
-        });
-        ui.add_space(14.0);
-
-        // Progress + summary
-        let total = local.job.as_ref().map(|j| j.planned).unwrap_or(local.steps.len()).max(1);
-        let done = local.steps.len();
-        let passed = local.steps.iter().filter(|s| s.passed()).count();
-        let failed = done - passed;
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
-        ui.painter().rect_filled(bar, CornerRadius::same(3), pal.hover);
-        if done > 0 {
-            let w = bar.width() * (done as f32 / total as f32).min(1.0);
-            let pass_w = w * passed as f32 / done as f32;
-            ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, vec2(pass_w, bar.height())), CornerRadius::same(3), pal.success);
-            if failed > 0 {
-                ui.painter().rect_filled(egui::Rect::from_min_size(pos2(bar.left() + pass_w, bar.top()), vec2(w - pass_w, bar.height())), CornerRadius::same(3), pal.error);
-            }
-        }
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            if local.is_running() {
-                ui.add(egui::Spinner::new().size(14.0).color(pal.accent));
-                ui.label(RichText::new(format!("Running {done} of {total}…")).color(pal.weak));
-            } else if let Some(summary) = &local.summary {
-                pill(ui, &format!("{} passed", summary.passed()), pal.success, true);
-                if summary.failed() > 0 {
-                    pill(ui, &format!("{} failed", summary.failed()), pal.error, true);
-                }
-                let (ok, all) = summary.assertions();
-                if all > 0 {
-                    pill(ui, &format!("{ok}/{all} assertions"), pal.weak, false);
-                }
-                pill(ui, &format_duration(local.elapsed.map(|d| d.as_secs_f64() * 1000.0).unwrap_or(summary.total_ms())), pal.weak, false);
-                if summary.cancelled {
-                    pill(ui, "stopped", pal.warning, false);
-                }
-            } else {
-                ui.label(RichText::new(format!("{} request{} will run in tree order. Responses feed {{% response %}} chaining like manual sends.", planned.len(), if planned.len() == 1 { "" } else { "s" })).color(pal.weak));
-            }
-        });
-        ui.add_space(10.0);
-
-        // Results
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            if local.steps.is_empty() && !local.is_running() {
-                list_plan(ui, state, &planned, &pal);
-                return;
-            }
-            let iterations = local.options.iterations > 1;
-            for (i, step) in local.steps.iter().enumerate() {
-                let expanded = local.expanded.contains(&i);
-                if step_row(ui, step, iterations, expanded, &pal).clicked() && !local.expanded.remove(&i) {
-                    local.expanded.insert(i);
-                }
-                if expanded {
-                    step_details(ui, step, &pal);
-                }
             }
         });
     });
 }
 
-fn list_plan(ui: &mut Ui, state: &NexusState, planned: &[Id], pal: &Palette) {
-    for id in planned {
-        let Some((folders, request)) = state.workspace.find_request(id) else {
-            continue;
-        };
-        ui.horizontal(|ui| {
-            ui.set_min_height(28.0);
-            widgets::request_label(ui, request, 40.0);
-            ui.add_space(6.0);
-            ui.label(RichText::new(&request.name).color(pal.text));
-            let path = folders
-                .iter()
-                .map(|f| f.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" / ");
-            if !path.is_empty() {
-                ui.label(RichText::new(path).size(12.0).color(pal.faint));
-            }
-            if !request.assertions.is_empty() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} assertion{}",
-                            request.assertions.len(),
-                            if request.assertions.len() == 1 {
-                                ""
-                            } else {
-                                "s"
-                            }
-                        ))
-                        .size(12.0)
-                        .color(pal.weak),
-                    );
-                });
-            }
-        });
+fn plan_table(ui: &mut Ui, state: &NexusState, local: &mut RunnerUi, planned: &[Id]) {
+    if planned.is_empty() {
+        EmptyState::new("Nothing to run")
+            .icon(Glyph::Run)
+            .hint("Add requests to this folder or pick another scope.")
+            .show(ui);
+        return;
     }
-}
-
-fn step_row(
-    ui: &mut Ui,
-    step: &StepResult,
-    iterations: bool,
-    expanded: bool,
-    pal: &Palette,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
-    if resp.hovered() || expanded {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), pal.hover);
-    }
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(8.0, 0.0)))
-            .layout(Layout::left_to_right(Align::Center)),
+    let height = rows_height(ui);
+    let rows: Vec<_> = planned
+        .iter()
+        .filter_map(|id| state.workspace.find_request(id))
+        .collect();
+    let (columns, selected) = local.plan_table.columns(
+        ui,
+        &[
+            ("Method", 80.0, true),
+            ("Request", 240.0, false),
+            ("Assertions", 100.0, false),
+            ("Folder", 300.0, false),
+        ],
     );
-    let (icon_rect, _) = child.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-    let (icon, color) = if step.passed() {
-        (Icon::Check, pal.success)
-    } else {
-        (Icon::Close, pal.error)
-    };
-    paint_icon(child.painter(), icon_rect, icon, color);
-    child.add_space(4.0);
-    widgets::method_label(&mut child, &Method::from(step.method.clone()), 40.0);
-    child.add_space(6.0);
-    child.label(RichText::new(&step.name).color(pal.strong));
-    if iterations {
-        child.label(
-            RichText::new(format!("#{}", step.iteration))
-                .size(12.0)
-                .color(pal.faint),
-        );
-    }
-    child.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.label(
-            RichText::new(format_duration(step.duration_ms))
-                .font(mono(12.0))
-                .color(pal.weak),
-        );
-        match step.status {
-            Some(s) => {
-                pill(ui, &s.to_string(), pal.status(s), true);
+    Table::new(
+        "runner-plan",
+        columns,
+        rows.len(),
+        selected,
+    )
+    .name("Requests to run")
+    .height(height)
+    .show(ui, |row, col| {
+        let (folders, request) = &rows[row];
+        match col {
+            0 => {
+                let method = request.method.to_string();
+                Cell::new(method.clone()).tone(Tone::method(&method))
             }
-            None => {
-                pill(ui, "error", pal.error, true);
-            }
-        }
-        if !step.assertions.is_empty() {
-            let ok = step.assertions.iter().filter(|a| a.passed).count();
-            ui.label(
-                RichText::new(format!("{ok}/{} assertions", step.assertions.len()))
-                    .size(12.0)
-                    .color(if ok == step.assertions.len() {
-                        pal.weak
-                    } else {
-                        pal.error
-                    }),
-            );
+            1 => Cell::new(request.name.as_str()),
+            2 => Cell::new(match request.assertions.len() {
+                0 => String::new(),
+                n => n.to_string(),
+            })
+            .muted(),
+            _ => Cell::new(
+                folders
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+            )
+            .muted(),
         }
     });
-    resp
 }
 
-fn step_details(ui: &mut Ui, step: &StepResult, pal: &Palette) {
-    field_frame(pal)
-        .inner_margin(egui::Margin::symmetric(14, 8))
-        .outer_margin(egui::Margin {
-            left: 30,
-            right: 4,
-            top: 2,
-            bottom: 6,
-        })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if let Some(e) = &step.error {
-                ui.label(RichText::new(e).font(mono(12.0)).color(pal.error));
+fn results(ui: &mut Ui, local: &mut RunnerUi) {
+    let iterations = local.options.iterations > 1;
+    let details_h = 150.0;
+    let table_h = (rows_height(ui) - details_h).max(size::ROW_HEIGHT * 3.0);
+    let steps = &local.steps;
+    let (columns, selected) = local.results_table.columns(
+        ui,
+        &[
+            ("Result", 80.0, false),
+            ("Method", 80.0, true),
+            ("Request", 240.0, false),
+            ("Iteration", 80.0, false),
+            ("Status", 80.0, true),
+            ("Assertions", 110.0, false),
+            ("Time", 90.0, true),
+        ],
+    );
+    let out = Table::new(
+        "runner-results",
+        columns,
+        steps.len(),
+        selected,
+    )
+    .name("Run results")
+    .height(table_h)
+    .show(ui, |row, col| {
+        let step = &steps[row];
+        match col {
+            0 if step.passed() => Cell::new("Pass").icon(Glyph::Check).tone(Tone::Success),
+            0 => Cell::new("Fail").icon(Glyph::Close).tone(Tone::Error),
+            1 => Cell::new(step.method.as_str()).tone(Tone::method(&step.method)),
+            2 => Cell::new(step.name.as_str()),
+            3 if iterations => Cell::new(format!("#{}", step.iteration)).muted(),
+            3 => Cell::new(""),
+            4 => match step.status {
+                Some(s) => Cell::new(s.to_string()).tone(Tone::status(s)),
+                None => Cell::new("error").tone(Tone::Error),
+            },
+            5 if step.assertions.is_empty() => Cell::new(""),
+            5 => {
+                let ok = step.assertions.iter().filter(|a| a.passed).count();
+                let cell = Cell::new(format!("{ok}/{}", step.assertions.len()));
+                if ok == step.assertions.len() {
+                    cell.muted()
+                } else {
+                    cell.tone(Tone::Error)
+                }
             }
-            if step.assertions.is_empty() && step.error.is_none() {
-                ui.label(RichText::new("No assertions on this request.").color(pal.weak));
-            }
-            for a in &step.assertions {
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                    paint_icon(
-                        ui.painter(),
-                        r,
-                        if a.passed { Icon::Check } else { Icon::Close },
-                        if a.passed { pal.success } else { pal.error },
-                    );
-                    ui.label(&a.description);
-                    if !a.passed {
-                        ui.label(RichText::new(format!("got {}", a.actual)).color(pal.weak));
-                    }
-                });
+            _ => Cell::new(format_duration(step.duration_ms)).muted(),
+        }
+    });
+    if out.selection_changed || out.activated.is_some() {
+        local.details = local.results_table.selected;
+    }
+    let Some(step) = local.details.and_then(|i| local.steps.get(i)) else {
+        return;
+    };
+    ui.add(SectionHeader::new(format!("{} · details", step.name)));
+    let mut lines: Vec<(Glyph, Tone, String, Option<String>)> = Vec::new();
+    if let Some(e) = &step.error {
+        lines.push((Glyph::Error, Tone::Error, e.clone(), None));
+    }
+    for a in &step.assertions {
+        let (glyph, tone) = if a.passed {
+            (Glyph::Check, Tone::Success)
+        } else {
+            (Glyph::Close, Tone::Error)
+        };
+        let got = (!a.passed).then(|| format!("got {}", a.actual));
+        lines.push((glyph, tone, a.description.clone(), got));
+    }
+    if lines.is_empty() {
+        ui.label("No assertions on this request.");
+        return;
+    }
+    let mut none = None;
+    VirtualList::new("runner-details", lines.len(), &mut none)
+        .name("Assertion details")
+        .height(details_h - size::HEADER_HEIGHT)
+        .show(ui, |i| {
+            let (glyph, tone, text, got) = &lines[i];
+            let row = ListRow::new(text).icon(*glyph).icon_tone(*tone);
+            match got {
+                Some(got) => row.secondary(got),
+                None => row,
             }
         });
 }
