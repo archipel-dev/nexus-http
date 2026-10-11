@@ -142,6 +142,51 @@ struct InFlight {
     rx: Receiver<(Result<Response, String>, CookieJar)>,
 }
 
+/// egui temp-data key holding the workspace's secret variable names, so
+/// completion never previews their values.
+pub const SECRET_KEYS_ID: &str = "nexus-secret-keys";
+
+/// Pane sizes the user chose, as shares of the space; saved as `ui.json` in the store.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct UiSettings {
+    /// Share of the window the sidebar gets.
+    pub sidebar_ratio: f32,
+    /// Share of the area right of the sidebar the request pane gets.
+    pub request_ratio: f32,
+}
+
+impl UiSettings {
+    pub const DEFAULT_SIDEBAR: f32 = 0.21;
+    pub const DEFAULT_REQUEST: f32 = 0.5;
+    const FILE: &'static str = "ui.json";
+
+    fn load(store: Option<&Store>) -> Self {
+        store
+            .and_then(|s| std::fs::read(s.root().join(Self::FILE)).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, store: Option<&Store>) {
+        if let Some(store) = store
+            && std::fs::create_dir_all(store.root()).is_ok()
+            && let Ok(json) = serde_json::to_vec_pretty(self)
+        {
+            let _ = std::fs::write(store.root().join(Self::FILE), json);
+        }
+    }
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            sidebar_ratio: Self::DEFAULT_SIDEBAR,
+            request_ratio: Self::DEFAULT_REQUEST,
+        }
+    }
+}
+
 pub struct NexusState {
     store: Option<Store>,
     base_dir: PathBuf,
@@ -157,8 +202,10 @@ pub struct NexusState {
     pub filter: String,
     /// Folder ids collapsed in the sidebar.
     pub collapsed: std::collections::HashSet<Id>,
-    /// Transient message for the status line.
+    /// Transient message shown as a toast.
     pub notice: Option<(String, Instant)>,
+    /// Layout the user chose, persisted next to the workspace.
+    pub ui: UiSettings,
     inflight: Option<InFlight>,
     pub streams: std::collections::HashMap<Id, StreamState>,
     pub schemas: std::collections::HashMap<Id, SchemaState>,
@@ -190,6 +237,7 @@ impl NexusState {
         let mut state = Self::with_workspace(workspace, Some(store), dir.to_owned());
         state.jar = jar;
         state.history = history;
+        state.ui = UiSettings::load(state.store.as_ref());
         state.notice = notice.map(|n| (n, Instant::now()));
         state
     }
@@ -215,6 +263,7 @@ impl NexusState {
             filter: String::new(),
             collapsed: Default::default(),
             notice: None,
+            ui: UiSettings::default(),
             inflight: None,
             streams: Default::default(),
             schemas: Default::default(),
@@ -671,11 +720,20 @@ impl NexusState {
                                 .find_request(&id)
                                 .map(|(_, r)| assertions::check_all(&r.assertions, &response))
                                 .unwrap_or_default();
+                            self.notice = Some((
+                                format!("{} {}", response.status, response.reason)
+                                    .trim()
+                                    .to_owned(),
+                                Instant::now(),
+                            ));
                             self.history.push(id.clone(), response.clone());
                             self.history_dirty = true;
                             Outcome::Response(Box::new(response), checks)
                         }
-                        Err(e) => Outcome::Error(e),
+                        Err(e) => {
+                            self.notice = Some((format!("Request failed: {e}"), Instant::now()));
+                            Outcome::Error(e)
+                        }
                     };
                     self.outcomes.insert(id, outcome);
                 }
@@ -786,6 +844,11 @@ impl NexusState {
         {
             self.notify(format!("Saving failed: {e}"));
         }
+    }
+
+    /// Saves the layout when the user changed it.
+    pub fn save_ui(&self) {
+        self.ui.save(self.store.as_ref());
     }
 
     fn save_local(&mut self) {
