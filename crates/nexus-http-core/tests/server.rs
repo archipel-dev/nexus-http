@@ -668,3 +668,103 @@ fn introspects_graphql_schema() {
     .unwrap();
     assert_eq!(schema.types["Query"].fields[0].name, "hello");
 }
+
+#[test]
+fn runner_receives_streams_with_a_bound_and_asserts_on_messages() {
+    use nexus_http_core::model::Protocol;
+    use nexus_http_core::runner::{RunOptions, run};
+    use std::io::Write;
+    // SSE server: sends 5 events, then holds the connection open.
+    let sse = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let sse_port = sse.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let (mut s, _) = sse.accept().unwrap();
+        let _ = std::io::Read::read(&mut s, &mut [0u8; 2048]);
+        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+        for i in 1..=5 {
+            let _ = s.write_all(format!("data: {{\"tick\":{i}}}\n\n").as_bytes());
+            let _ = s.flush();
+        }
+        thread::sleep(Duration::from_secs(10));
+    });
+    // WebSocket server: greets, then keeps the socket open.
+    let ws_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ws_port = ws_listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let (stream, _) = ws_listener.accept().unwrap();
+        let mut ws = tungstenite::accept(stream).unwrap();
+        ws.send(tungstenite::Message::text("welcome")).unwrap();
+        while ws.read().is_ok() {}
+    });
+    let mut feed = Request::new(
+        "feed",
+        Method::Get,
+        format!("http://127.0.0.1:{sse_port}/e"),
+    );
+    feed.protocol = Protocol::Sse;
+    feed.assertions.push(Assertion::new(
+        Source::Body,
+        Operator::Contains,
+        "\"tick\":2",
+    ));
+    feed.assertions.push(Assertion::new(
+        Source::Body,
+        Operator::NotContains,
+        "\"tick\":3",
+    ));
+    let mut sock = Request::new("sock", Method::Get, format!("http://127.0.0.1:{ws_port}/s"));
+    sock.protocol = Protocol::WebSocket;
+    sock.assertions
+        .push(Assertion::new(Source::Body, Operator::Equals, "welcome"));
+    let mut ws = Workspace::new("W");
+    ws.items.push(Item::Request(feed));
+    ws.items.push(Item::Request(sock));
+    let summary = run(
+        &ws,
+        &RunOptions {
+            stream_messages: 2,
+            stream_timeout: Duration::from_secs(1),
+            ..Default::default()
+        },
+        Path::new("."),
+        &client(),
+        &mut CookieJar::default(),
+        &mut History::default(),
+        &AtomicBool::new(false),
+        |_| {},
+    );
+    assert_eq!(summary.failed(), 0, "{:?}", summary.steps);
+    // The SSE step stops at the message bound; the WS step at the timeout.
+    assert_eq!(summary.steps[0].streamed, Some(2));
+    assert_eq!(summary.steps[0].status, Some(200));
+    assert_eq!(summary.steps[1].streamed, Some(1));
+    assert_eq!(summary.steps[1].status, Some(101));
+}
+
+#[test]
+fn runner_reports_unreachable_streams_as_errors() {
+    use nexus_http_core::model::Protocol;
+    use nexus_http_core::runner::{RunOptions, run};
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let mut req = Request::new("gone", Method::Get, format!("http://127.0.0.1:{port}/e"));
+    req.protocol = Protocol::Sse;
+    let mut ws = Workspace::new("W");
+    ws.items.push(Item::Request(req));
+    let summary = run(
+        &ws,
+        &RunOptions {
+            stream_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        Path::new("."),
+        &client(),
+        &mut CookieJar::default(),
+        &mut History::default(),
+        &AtomicBool::new(false),
+        |_| {},
+    );
+    assert_eq!(summary.failed(), 1);
+    assert!(summary.steps[0].error.is_some());
+}
