@@ -5,16 +5,20 @@
 use crate::state::NexusState;
 use archipel_kit::behaviour::{Behaviour, ContextMenu, DragSource, DropTarget};
 use archipel_kit::components::{
-    Avatar, Dropdown, EmptyState, IconButton, ListRow, MenuItem, MenuSeparator, Tag, TextField,
-    VirtualList,
+    Dropdown, EmptyState, IconButton, ListRow, MenuItem, MenuSeparator, Tag, TextField, VirtualList,
 };
 use archipel_kit::parts::{Popover, Slot};
-use archipel_kit::tokens::{size, typography};
+use archipel_kit::tokens::size;
 use archipel_kit::{Glyph, Theme, Tone, cursor, egui};
 use egui::{Key, Modifiers, Rect, Response, Ui, pos2, vec2};
 use nexus_http_core::model::{Id, Item, Protocol, Request};
 use std::cell::{Cell, RefCell};
 use std::fmt;
+
+/// Width of the workspace menu.
+const WORKSPACE_MENU_WIDTH: f32 = 210.0;
+/// Width of the New menu.
+const ADD_MENU_WIDTH: f32 = 190.0;
 
 #[derive(Default)]
 pub struct SidebarUi {
@@ -102,74 +106,102 @@ impl Behaviour for DropOn<'_> {
     }
 }
 
+/// The header buttons of the collections tool window: New (request, folder, import) and
+/// the workspace menu. Laid out right to left: the first one added is the rightmost.
+pub fn header_actions(
+    ui: &mut Ui,
+    state: &mut NexusState,
+    local: &mut SidebarUi,
+    actions: &mut SidebarActions,
+) {
+    let more = ui.add(IconButton::new(Glyph::More, "Workspace actions"));
+    if more.clicked() {
+        local.workspace_menu = !local.workspace_menu;
+    }
+    let mut menu = local.workspace_menu;
+    let closed = Popover::below("nexus-workspace-menu", &more)
+        .width(WORKSPACE_MENU_WIDTH)
+        .show(ui.ctx(), &mut menu, |ui| {
+            let mut chosen = false;
+            for (label, icon, action) in [
+                ("Import…", Glyph::Download, 0),
+                ("Run collection…", Glyph::Run, 1),
+                ("Export workspace…", Glyph::Upload, 2),
+            ] {
+                if ui.add(MenuItem::new(label).icon(icon)).clicked() {
+                    match action {
+                        0 => actions.open_import = true,
+                        1 => actions.run = Some(None),
+                        _ => actions.export = true,
+                    }
+                    chosen = true;
+                }
+            }
+            ui.add(MenuSeparator);
+            if ui
+                .add(MenuItem::new("Manage environments…").icon(Glyph::Settings))
+                .clicked()
+            {
+                actions.open_environments = true;
+                chosen = true;
+            }
+            chosen
+        });
+    local.workspace_menu = menu && !closed.unwrap_or(false);
+
+    let plus = ui.add(IconButton::new(Glyph::Plus, "New request or folder"));
+    if plus.clicked() {
+        local.add_menu = !local.add_menu;
+    }
+    let mut menu = local.add_menu;
+    let closed = Popover::below("nexus-add-menu", &plus)
+        .width(ADD_MENU_WIDTH)
+        .show(ui.ctx(), &mut menu, |ui| {
+            let mut chosen = false;
+            if ui
+                .add(
+                    MenuItem::new("New Request")
+                        .icon(Glyph::NewFile)
+                        .shortcut("Ctrl+N"),
+                )
+                .clicked()
+            {
+                state.new_request(None);
+                chosen = true;
+            }
+            if ui
+                .add(MenuItem::new("New Folder").icon(Glyph::NewFolder))
+                .clicked()
+            {
+                let id = state.new_folder(None);
+                local.renaming = Some((id, "New Folder".into(), true));
+                chosen = true;
+            }
+            ui.add(MenuSeparator);
+            if ui
+                .add(MenuItem::new("Import…").icon(Glyph::Download))
+                .clicked()
+            {
+                actions.open_import = true;
+                chosen = true;
+            }
+            chosen
+        });
+    local.add_menu = menu && !closed.unwrap_or(false);
+}
+
+/// The body of the collections tool window: environment, filter and the request tree.
 pub fn show(
     ui: &mut Ui,
     state: &mut NexusState,
     local: &mut SidebarUi,
     actions: &mut SidebarActions,
 ) {
-    let colors = Theme::colors(ui.ctx());
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space(size::CONTENT_INSET);
-        ui.add(Avatar::new(state.workspace.name.clone()).size(20.0));
-        ui.label(
-            egui::RichText::new(&state.workspace.name)
-                .font(typography::semibold(ui.ctx(), 14.0))
-                .color(colors.text_strong),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(8.0);
-            let more = ui.add(IconButton::new(Glyph::More, "Workspace actions"));
-            if more.clicked() {
-                local.workspace_menu = !local.workspace_menu;
-            }
-            let mut menu = local.workspace_menu;
-            let closed = Popover::below("nexus-workspace-menu", &more)
-                .width(210.0)
-                .show(ui.ctx(), &mut menu, |ui| {
-                    let mut chosen = false;
-                    if ui
-                        .add(MenuItem::new("Import…").icon(Glyph::Download))
-                        .clicked()
-                    {
-                        actions.open_import = true;
-                        chosen = true;
-                    }
-                    if ui
-                        .add(MenuItem::new("Run collection…").icon(Glyph::Run))
-                        .clicked()
-                    {
-                        actions.run = Some(None);
-                        chosen = true;
-                    }
-                    if ui
-                        .add(MenuItem::new("Export workspace…").icon(Glyph::Upload))
-                        .clicked()
-                    {
-                        actions.export = true;
-                        chosen = true;
-                    }
-                    ui.add(MenuSeparator);
-                    if ui
-                        .add(MenuItem::new("Manage environments…").icon(Glyph::Settings))
-                        .clicked()
-                    {
-                        actions.open_environments = true;
-                        chosen = true;
-                    }
-                    chosen
-                });
-            local.workspace_menu = menu && !closed.unwrap_or(false);
-        });
-    });
-    ui.add_space(6.0);
+    ui.spacing_mut().item_spacing.y = size::TOOLBAR_GAP;
     environment_picker(ui, state, actions);
-    ui.add_space(8.0);
-
     ui.horizontal(|ui| {
         ui.add_space(size::CONTENT_INSET);
-        let width = ui.available_width() - size::CONTROL_HEIGHT - 12.0;
+        let width = ui.available_width() - size::CONTENT_INSET;
         let filter = ui.add(
             TextField::search(&mut state.filter)
                 .placeholder("Filter requests")
@@ -181,45 +213,7 @@ pub fn show(
         {
             state.filter.clear();
         }
-        let plus = ui.add(IconButton::new(Glyph::Plus, "New request or folder"));
-        if plus.clicked() {
-            local.add_menu = !local.add_menu;
-        }
-        let mut menu = local.add_menu;
-        let closed =
-            Popover::below("nexus-add-menu", &plus)
-                .width(190.0)
-                .show(ui.ctx(), &mut menu, |ui| {
-                    let mut chosen = false;
-                    if ui
-                        .add(MenuItem::new("New Request").icon(Glyph::NewFile))
-                        .clicked()
-                    {
-                        state.new_request(None);
-                        chosen = true;
-                    }
-                    if ui
-                        .add(MenuItem::new("New Folder").icon(Glyph::NewFolder))
-                        .clicked()
-                    {
-                        let id = state.new_folder(None);
-                        local.renaming = Some((id, "New Folder".into(), true));
-                        chosen = true;
-                    }
-                    ui.add(MenuSeparator);
-                    if ui
-                        .add(MenuItem::new("Import…").icon(Glyph::Download))
-                        .clicked()
-                    {
-                        actions.open_import = true;
-                        chosen = true;
-                    }
-                    chosen
-                });
-        local.add_menu = menu && !closed.unwrap_or(false);
     });
-    ui.add_space(6.0);
-
     tree(ui, state, local, actions);
 }
 
@@ -243,7 +237,9 @@ fn environment_picker(ui: &mut Ui, state: &mut NexusState, actions: &mut Sidebar
             .cloned()
             .unwrap_or(base);
         let before = choice.id.clone();
-        let width = ui.available_width() - size::CONTROL_HEIGHT - 12.0;
+        let width =
+            ui.available_width() - size::ICON_BUTTON - size::TOOLBAR_GAP - size::CONTENT_INSET;
+        ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
         ui.add(
             Dropdown::new("nexus-environment", &mut choice, options)
                 .label("Environment")
@@ -500,26 +496,13 @@ fn tree(ui: &mut Ui, state: &mut NexusState, local: &mut SidebarUi, actions: &mu
     {
         toggle_folder(state, &row.id);
     }
-    // Left/Right on a focused tree collapse and expand the folder under the cursor.
+    // Left/Right collapse and expand the folder under the cursor: the kit's list reports
+    // them as `toggled` above. F2 renames it.
     if out.response.has_focus()
-        && filter.is_empty()
         && let Some(row) = selected.and_then(|i| rows.get(i))
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2))
     {
-        let (left, right, rename) = ui.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowLeft),
-                i.consume_key(Modifiers::NONE, Key::ArrowRight),
-                i.consume_key(Modifiers::NONE, Key::F2),
-            )
-        });
-        match row.folder {
-            Some(true) if left => toggle_folder(state, &row.id),
-            Some(false) if right => toggle_folder(state, &row.id),
-            _ => {}
-        }
-        if rename {
-            local.renaming = Some((row.id.clone(), row.name.clone(), true));
-        }
+        local.renaming = Some((row.id.clone(), row.name.clone(), true));
     }
 
     inline_rename(ui, state, local, &rows, rename_rect.get());

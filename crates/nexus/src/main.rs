@@ -120,9 +120,7 @@ impl eframe::App for Host {
             self.app.state.send_stream_message(&id);
             ctx.request_repaint();
         }
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new())
-            .show(ctx, |ui| self.app.ui(ui));
+        self.app.window(ctx);
     }
 }
 

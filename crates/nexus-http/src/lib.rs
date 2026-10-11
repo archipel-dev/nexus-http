@@ -5,21 +5,19 @@
 //! colors. The engine lives in `nexus-http-core`; [`state::NexusState`] is the
 //! UI-independent controller.
 
-pub mod complete;
 pub mod graphql_ui;
 pub mod oauth;
 pub mod plugin;
 pub mod state;
-pub mod theme;
 pub mod views;
-pub mod widgets;
 
 pub use plugin::NexusHttpPlugin;
 
-use archipel_kit::components::{EmptyState, Kbd, Severity, SplitPane, Toast};
-use archipel_kit::parts::Surface;
-use archipel_kit::tokens::size;
-use archipel_kit::{Glyph, Theme};
+use archipel_kit::Glyph;
+use archipel_kit::components::{
+    EmptyState, Kbd, Severity, StatusBarItem, Toast, Workbench, WorkbenchPlace, WorkbenchRegion,
+    WorkbenchState,
+};
 use egui::{Key, KeyboardShortcut, Modifiers, Ui};
 use nexus_http_core::model::{Auth, Item};
 use nexus_http_core::template::Context;
@@ -27,10 +25,6 @@ use state::{NexusState, UiSettings};
 use std::path::Path;
 use views::overlays::{Overlay, OverlayUi};
 
-/// Smallest widths (points) that keep every column usable at 1024x700.
-const MIN_SIDEBAR: f32 = 200.0;
-const MIN_EDITOR: f32 = 560.0;
-const MIN_PANE: f32 = 280.0;
 /// Narrowest pane the views are drawn in.
 const MIN_CONTENT: f32 = 100.0;
 
@@ -42,6 +36,8 @@ pub struct NexusApp {
     runner: views::runner::RunnerUi,
     /// The collection runner replaces the request/response islands.
     pub runner_open: bool,
+    /// Island sizes and visibility; the ratios are saved with the workspace's UI settings.
+    layout: WorkbenchState,
     layout_dirty: Option<std::time::Instant>,
     token_job: Option<(nexus_http_core::model::Id, oauth::TokenJob)>,
 }
@@ -65,7 +61,13 @@ impl NexusApp {
     }
 
     pub fn with_state(state: NexusState) -> Self {
+        let layout = WorkbenchState {
+            left_ratio: state.ui.sidebar_ratio,
+            center_ratio: state.ui.request_ratio,
+            ..WorkbenchState::default()
+        };
         Self {
+            layout,
             state,
             sidebar: Default::default(),
             response: Default::default(),
@@ -223,8 +225,43 @@ impl NexusApp {
         }
     }
 
-    /// Renders the client into `ui`, filling the available rect.
+    /// Renders the client into `ui`, filling it: the islands, without a status bar. For a
+    /// plugin tool window or editor tab.
     pub fn ui(&mut self, ui: &mut Ui) {
+        self.frame(ui);
+        let tabs = self.response_tabs();
+        let (mut places, layout) = self.places();
+        let title = places.title.clone();
+        Self::workbench(layout, &title, tabs).show_inside_with(ui, &mut places, Places::fill);
+        let outcome = places.finish();
+        self.sync_response_tab();
+        self.apply(ui, outcome);
+    }
+
+    /// Renders the client as a whole window: the islands and the status bar. For the
+    /// standalone app.
+    pub fn window(&mut self, ctx: &egui::Context) {
+        // Background work and shortcuts, on a layer that draws nothing.
+        egui::Area::new(egui::Id::new("nexus-frame"))
+            .order(egui::Order::Background)
+            .show(ctx, |ui| self.frame(ui));
+        let tabs = self.response_tabs();
+        let outcome = {
+            let (mut places, layout) = self.places();
+            let title = places.title.clone();
+            Self::workbench(layout, &title, tabs)
+                .with_status()
+                .show_with(ctx, &mut places, Places::fill);
+            places.finish()
+        };
+        self.sync_response_tab();
+        egui::Area::new(egui::Id::new("nexus-overlays"))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| self.apply(ui, outcome));
+    }
+
+    /// Per-frame work before the islands: background jobs, shortcuts, the secret names.
+    fn frame(&mut self, ui: &mut Ui) {
         if self.poll() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(50));
@@ -241,102 +278,90 @@ impl NexusApp {
                 std::sync::Arc::new(secrets),
             )
         });
-        let colors = Theme::colors(ui.ctx());
-        let full = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(full, 0.0, colors.frame);
-        let area = full.shrink(size::ISLAND_GAP);
-        let mut shell = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(area)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
+    }
 
-        let mut side_actions = views::sidebar::SidebarActions::default();
-        let mut req_actions = views::request::RequestActions::default();
+    /// The islands of the client: collections on the left, the request in the center, the
+    /// response on the right.
+    fn workbench<'a>(
+        layout: &'a mut WorkbenchState,
+        title: &str,
+        response_tabs: Option<Vec<String>>,
+    ) -> Workbench<'a> {
+        let workbench = Workbench::new("nexus", layout)
+            .tool(WorkbenchRegion::Left, title, Glyph::Folder)
+            .tool(WorkbenchRegion::Right, "Response", Glyph::Server)
+            .center_padded(false);
+        match response_tabs {
+            Some(tabs) => workbench.tool_tabs(WorkbenchRegion::Right, tabs),
+            None => workbench,
+        }
+    }
+
+    /// The response's content tabs for the header, and the layout set to the current one.
+    fn response_tabs(&mut self) -> Option<Vec<String>> {
+        let id = self.state.selected.clone()?;
+        let tabs = views::response::tab_labels(&self.state, &id, &self.response)?;
+        let current = state::ResponseTab::ALL
+            .iter()
+            .position(|t| *t == self.state.response_tab)
+            .unwrap_or(0);
+        self.layout.tool_tabs[1] = current;
+        Some(tabs)
+    }
+
+    /// The response tab the header selected.
+    fn sync_response_tab(&mut self) {
+        let index = self.layout.tool_tab(WorkbenchRegion::Right);
+        if let Some(tab) = state::ResponseTab::ALL.get(index) {
+            self.state.response_tab = *tab;
+        }
+    }
+
+    /// What the islands need this frame, borrowed from the app.
+    fn places(&mut self) -> (Places<'_>, &mut WorkbenchState) {
         let selected = self.state.selected_request().map(|r| r.id.clone());
-        let settings = self.state.ui;
-        let (mut sidebar_ratio, mut request_ratio) =
-            (settings.sidebar_ratio, settings.request_ratio);
-        let runner_open = self.runner_open;
-        let mut close_runner = false;
+        let title = self.state.workspace.name.clone();
         let Self {
             state,
             sidebar,
             response,
             runner,
+            runner_open,
+            layout,
             ..
         } = self;
-        // The panes run one after the other but their closures are built together.
-        let shared = std::cell::RefCell::new(&mut *state);
+        (
+            Places {
+                state,
+                sidebar,
+                response,
+                runner,
+                runner_open: *runner_open,
+                selected,
+                title,
+                side_actions: Default::default(),
+                req_actions: Default::default(),
+                close_runner: false,
+            },
+            layout,
+        )
+    }
 
-        SplitPane::horizontal("nexus-sidebar", &mut sidebar_ratio)
-            .default_ratio(UiSettings::DEFAULT_SIDEBAR)
-            .min_sizes(MIN_SIDEBAR, MIN_EDITOR)
-            .label("Resize sidebar")
-            .show(
-                &mut shell,
-                |ui| {
-                    island(ui, |ui| {
-                        views::sidebar::show(
-                            ui,
-                            &mut shared.borrow_mut(),
-                            sidebar,
-                            &mut side_actions,
-                        )
-                    })
-                },
-                |ui| {
-                    if runner_open {
-                        island(ui, |ui| {
-                            views::runner::show(
-                                ui,
-                                &mut shared.borrow_mut(),
-                                runner,
-                                &mut close_runner,
-                            )
-                        });
-                        return;
-                    }
-                    SplitPane::horizontal("nexus-editor", &mut request_ratio)
-                        .default_ratio(UiSettings::DEFAULT_REQUEST)
-                        .min_size(MIN_PANE)
-                        .label("Resize request and response")
-                        .show(
-                            ui,
-                            |ui| {
-                                island(ui, |ui| match &selected {
-                                    Some(id) => views::request::show(
-                                        ui,
-                                        &mut shared.borrow_mut(),
-                                        id,
-                                        &mut req_actions,
-                                    ),
-                                    None => welcome(ui),
-                                })
-                            },
-                            |ui| {
-                                island(ui, |ui| {
-                                    if let Some(id) = &selected {
-                                        views::response::show(
-                                            ui,
-                                            &mut shared.borrow_mut(),
-                                            id,
-                                            response,
-                                        );
-                                    }
-                                })
-                            },
-                        );
-                },
-            );
+    /// Applies what the islands asked for, then saves the layout and shows the overlays.
+    fn apply(&mut self, ui: &mut Ui, outcome: Outcome) {
+        let Outcome {
+            mut side_actions,
+            req_actions,
+            close_runner,
+        } = outcome;
         if close_runner {
             self.runner_open = false;
         }
         let layout = UiSettings {
-            sidebar_ratio,
-            request_ratio,
+            sidebar_ratio: self.layout.left_ratio,
+            request_ratio: self.layout.center_ratio,
         };
-        if layout != settings {
+        if layout != self.state.ui {
             self.state.ui = layout;
             self.layout_dirty = Some(std::time::Instant::now());
         }
@@ -349,7 +374,6 @@ impl NexusApp {
         if let Some(scope) = side_actions.run.take() {
             self.open_runner(scope);
         }
-
         if side_actions.open_import {
             self.overlays.open(Overlay::Import);
         }
@@ -391,21 +415,83 @@ impl NexusApp {
     }
 }
 
-/// An island filling its pane.
-fn island(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    // A pane can be empty (or even negative) in egui's first, sizing frame.
-    let size = ui.max_rect().size().max(egui::Vec2::ZERO);
-    Surface::Island
-        .frame(ui.ctx())
-        .inner_margin(0)
-        .show(ui, |ui| {
-            ui.set_min_size(size);
-            ui.set_max_size(size);
-            // Views assume a usable pane: skip egui's zero-sized sizing frames.
-            if size.x >= MIN_CONTENT {
-                add(ui);
+/// The app's state as the islands see it for one frame.
+struct Places<'a> {
+    state: &'a mut NexusState,
+    sidebar: &'a mut views::sidebar::SidebarUi,
+    response: &'a mut views::response::ResponseUi,
+    runner: &'a mut views::runner::RunnerUi,
+    runner_open: bool,
+    selected: Option<nexus_http_core::model::Id>,
+    title: String,
+    side_actions: views::sidebar::SidebarActions,
+    req_actions: views::request::RequestActions,
+    close_runner: bool,
+}
+
+/// What the islands asked the app to do.
+struct Outcome {
+    side_actions: views::sidebar::SidebarActions,
+    req_actions: views::request::RequestActions,
+    close_runner: bool,
+}
+
+impl Places<'_> {
+    fn fill(place: WorkbenchPlace, ui: &mut Ui, places: &mut Self) {
+        // Views assume a usable pane: skip egui's zero-sized sizing frames.
+        if ui.available_width() < MIN_CONTENT {
+            return;
+        }
+        match place {
+            WorkbenchPlace::Tool(WorkbenchRegion::Left) => {
+                views::sidebar::show(ui, places.state, places.sidebar, &mut places.side_actions)
             }
-        });
+            WorkbenchPlace::ToolActions(WorkbenchRegion::Left) => views::sidebar::header_actions(
+                ui,
+                places.state,
+                places.sidebar,
+                &mut places.side_actions,
+            ),
+            WorkbenchPlace::Center => match &places.selected {
+                _ if places.runner_open => {
+                    views::runner::show(ui, places.state, places.runner, &mut places.close_runner)
+                }
+                Some(id) => views::request::show(ui, places.state, id, &mut places.req_actions),
+                None => welcome(ui),
+            },
+            WorkbenchPlace::Tool(WorkbenchRegion::Right) => match &places.selected {
+                Some(id) => views::response::show(ui, places.state, id, places.response),
+                None => {
+                    EmptyState::new("No response yet")
+                        .icon(Glyph::Server)
+                        .hint("Send a request to see its response here.")
+                        .show(ui);
+                }
+            },
+            WorkbenchPlace::Status => status_bar(ui, places.state),
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> Outcome {
+        Outcome {
+            side_actions: self.side_actions,
+            req_actions: self.req_actions,
+            close_runner: self.close_runner,
+        }
+    }
+}
+
+/// The status bar: the environment, what is being sent, the size of the workspace.
+fn status_bar(ui: &mut Ui, state: &NexusState) {
+    let env = state
+        .workspace
+        .active_environment()
+        .map_or("Base Environment".to_owned(), |e| e.name.clone());
+    ui.add(StatusBarItem::new(env).icon(Glyph::Globe));
+    if state.is_sending() {
+        ui.add(StatusBarItem::new("Sending…"));
+    }
 }
 
 fn welcome(ui: &mut Ui) {

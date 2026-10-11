@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "archipel-icons"
 version = "0.1.0"
-source = "git+https://github.com/archipel-dev/kit?branch=main#49472af3b8443c8b9090ed9716c5edbb9102f114"
+source = "git+https://www.github.com/archipel-dev/kit?branch=claude%2Fkit-lib-android-studio-ui-jleosm#8017c0a2f537b9bf2e01095e59bd620fb383d004"
 dependencies = [
  "egui",
 ]
@@ -291,11 +291,15 @@ dependencies = [
 [[package]]
 name = "archipel-kit"
 version = "0.1.0"
-source = "git+https://github.com/archipel-dev/kit?branch=main#49472af3b8443c8b9090ed9716c5edbb9102f114"
+source = "git+https://www.github.com/archipel-dev/kit?branch=claude%2Fkit-lib-android-studio-ui-jleosm#8017c0a2f537b9bf2e01095e59bd620fb383d004"
 dependencies = [
  "archipel-icons",
  "egui",
  "egui_kittest",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "serde",
 ]
 
 [[package]]
@@ -1224,7 +1228,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

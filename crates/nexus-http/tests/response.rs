@@ -89,10 +89,10 @@ fn shows_text(h: &testing::Harness<'_, Fixture>, needle: &str) -> bool {
 }
 
 fn harness(fixture: Fixture) -> testing::Harness<'static, Fixture> {
-    let mut harness = testing::harness_state(Theme::dark(), fixture, |ui, f| {
-        response::show(ui, &mut f.state, &f.id, &mut f.ui);
-    });
-    harness.set_size(egui::vec2(900.0, 600.0));
+    let mut harness =
+        testing::harness_state_sized(Theme::dark(), egui::vec2(900.0, 600.0), fixture, |ui, f| {
+            response::show(ui, &mut f.state, &f.id, &mut f.ui);
+        });
     harness.run_ok();
     harness
 }
@@ -155,30 +155,47 @@ fn invalid_filter_shows_a_banner_not_a_panic() {
     testing::audit(&mut h).assert_clean();
 }
 
+/// The pane showing `tab` (the tabs themselves are in the tool window header).
+fn on_tab(tab: ResponseTab) -> testing::Harness<'static, Fixture> {
+    let mut f = fixture();
+    f.state.response_tab = tab;
+    harness(f)
+}
+
+#[test]
+fn tab_labels_count_headers_cookies_and_checks() {
+    let f = fixture();
+    let labels = response::tab_labels(&f.state, &f.id, &f.ui).expect("an HTTP response");
+    assert_eq!(
+        labels,
+        [
+            "Preview",
+            "Raw",
+            "Headers (3)",
+            "Cookies (1)",
+            "Timeline",
+            "Tests (1/2)"
+        ]
+    );
+}
+
 #[test]
 fn switching_tabs_shows_headers() {
-    let mut h = harness(fixture());
-    h.get_by_label("Headers (3)").click();
-    h.run_ok();
-    assert_eq!(h.state().state.response_tab, ResponseTab::Headers);
+    let h = on_tab(ResponseTab::Headers);
     h.get_by_role_and_label(Role::Table, "Response headers");
     h.get_by_label_contains("x-request-id");
 }
 
 #[test]
 fn tests_tab_lists_assertions() {
-    let mut h = harness(fixture());
-    h.get_by_label("Tests (1/2)").click();
-    h.run_ok();
+    let h = on_tab(ResponseTab::Tests);
     h.get_by_label_contains("status equals 200");
     h.get_by_label_contains("count equals 3");
 }
 
 #[test]
 fn timeline_tab_lists_the_exchange() {
-    let mut h = harness(fixture());
-    h.get_by_label("Timeline").click();
-    h.run_ok();
+    let h = on_tab(ResponseTab::Timeline);
     h.get_by_label_contains("GET /items HTTP/1.1");
 }
 

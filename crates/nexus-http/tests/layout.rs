@@ -21,8 +21,7 @@ fn app() -> NexusApp {
 }
 
 fn harness(app: NexusApp, size: egui::Vec2) -> Harness<'static, NexusApp> {
-    let mut harness = testing::harness_state(Theme::dark(), app, |ui, app| app.ui(ui));
-    harness.set_size(size);
+    let mut harness = testing::harness_state_sized(Theme::dark(), size, app, |ui, app| app.ui(ui));
     harness.run();
     harness
 }
@@ -32,7 +31,7 @@ fn harness(app: NexusApp, size: egui::Vec2) -> Harness<'static, NexusApp> {
 /// dividers after it): archipel-dev/kit#21.
 fn known_kit_gap(f: &testing::Finding) -> bool {
     f.problem == Problem::Unreachable
-        && (f.element.starts_with("Button") || f.element.contains("Resize request and response"))
+        && (f.element.starts_with("Button") || f.element.contains("Resize right tool window"))
 }
 
 #[test]
@@ -41,15 +40,7 @@ fn app_screen_passes_the_audit_at_1280x800() {
     let found: Vec<_> = testing::audit(&mut harness)
         .findings
         .iter()
-        .filter(|f| {
-            // The legacy request and response panes (widgets.rs, theme.rs) are ported in
-            // archipel-dev/nexus-http#4.
-            let legacy = f.element.contains("TextInput")
-                || f.element.contains("Unknown")
-                || f.element.starts_with("Label")
-                || f.detail.contains("Unknown");
-            !(known_kit_gap(f) || legacy)
-        })
+        .filter(|f| !known_kit_gap(f))
         .map(|f| format!("{:?}: {} {}", f.problem, f.element, f.detail))
         .collect();
     assert!(found.is_empty(), "{found:#?}");
@@ -71,6 +62,7 @@ fn welcome_screen_passes_the_audit() {
 
 #[test]
 fn split_ratios_clamp_to_the_min_sizes_on_a_narrow_window() {
+    use archipel_kit::tokens::size;
     let mut app = app();
     // Ask for far more than fits: the layout clamps, the stored share is untouched.
     app.state.ui = UiSettings {
@@ -78,16 +70,18 @@ fn split_ratios_clamp_to_the_min_sizes_on_a_narrow_window() {
         request_ratio: 0.05,
     };
     let harness = harness(app, egui::vec2(1024.0, 700.0));
-    let sidebar = harness.get_by_label("Resize sidebar").rect();
-    let editor = harness.get_by_label("Resize request and response").rect();
-    // 1024 wide: the sidebar keeps at least 200, the editor at least 560 (2 x 280).
-    assert!(sidebar.center().x <= 1024.0 - 560.0 + 4.0, "{sidebar:?}");
-    assert!(sidebar.center().x >= 200.0, "{sidebar:?}");
+    let left = harness.get_by_label("Resize left tool window").rect();
+    let right = harness.get_by_label("Resize right tool window").rect();
+    // The request keeps the kit's minimum center width between the two tool windows.
     assert!(
-        editor.center().x - sidebar.center().x >= 280.0,
-        "{editor:?} {sidebar:?}"
+        right.center().x - left.center().x >= size::WORKBENCH_CENTER_MIN,
+        "{left:?} {right:?}"
     );
-    assert!(1024.0 - editor.center().x >= 280.0, "{editor:?}");
+    assert!(left.center().x >= size::SPLIT_MIN_PANE, "{left:?}");
+    assert!(
+        1024.0 - right.center().x >= size::SPLIT_MIN_PANE,
+        "{right:?}"
+    );
 }
 
 #[test]
@@ -127,4 +121,34 @@ fn layout_persists_next_to_the_workspace() {
     // A file with missing fields falls back to the defaults.
     std::fs::write(dir.path().join(".nexus/ui.json"), "{}").unwrap();
     assert_eq!(NexusState::open(dir.path()).ui, UiSettings::default());
+}
+
+#[test]
+fn the_response_tabs_in_the_tool_window_header_switch_the_pane() {
+    use nexus_http::state::{Outcome, ResponseTab};
+    use nexus_http_core::response::{Response, Timings};
+    let mut app = app();
+    let id = app.state.selected.clone().expect("a selected request");
+    let response = Response {
+        request_id: None,
+        method: "GET".into(),
+        url: "https://api.test/users".into(),
+        status: 200,
+        reason: "OK".into(),
+        http_version: "HTTP/1.1".into(),
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: b"{}".to_vec(),
+        truncated: false,
+        timings: Timings::default(),
+        timeline: Vec::new(),
+        redirects: 0,
+        started_at: 0,
+    };
+    app.state
+        .outcomes
+        .insert(id, Outcome::Response(Box::new(response), Vec::new()));
+    let mut harness = harness(app, egui::vec2(1600.0, 800.0));
+    harness.get_by_label("Headers (1)").click();
+    harness.run();
+    assert_eq!(harness.state().state.response_tab, ResponseTab::Headers);
 }

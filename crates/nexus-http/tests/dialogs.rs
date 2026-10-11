@@ -28,15 +28,15 @@ fn state() -> NexusState {
 fn open(overlay: Overlay) -> Harness<'static, Screen> {
     let mut overlays = OverlayUi::default();
     overlays.open(overlay);
-    let mut harness = testing::harness_state(
+    let mut harness = testing::harness_state_sized(
         Theme::dark(),
+        egui::vec2(1280.0, 800.0),
         Screen {
             state: state(),
             overlays,
         },
         |ui, s| overlays::show(ui, &mut s.state, &mut s.overlays),
     );
-    harness.set_size(egui::vec2(1280.0, 800.0));
     harness.run();
     harness
 }
@@ -177,7 +177,7 @@ fn arrow_down_then_enter_in_the_switcher_opens_the_second_request() {
 fn import_of_a_curl_command_adds_a_request() {
     let mut harness = open(Overlay::Import);
     let before = harness.state().state.workspace.requests().len();
-    let editor = harness.get_by_role(Role::MultilineTextInput);
+    let editor = harness.get_by_label("Collection to import");
     editor.focus();
     editor.type_text("curl -X POST https://api.test/orders -H 'Content-Type: application/json'");
     harness.run();

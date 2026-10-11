@@ -2,20 +2,27 @@
 //! import, export and code generation.
 
 use crate::state::NexusState;
-use crate::widgets::{Syntax, code_editor, code_view};
+use archipel_kit::components::code::{Json, PlainText};
 use archipel_kit::components::{
-    Banner, Button, Checkbox, Dialog, DialogAction, Dropdown, EmptyState, Kbd, ListRow, Severity,
-    Tag, TextField, VirtualList,
+    Banner, Button, Checkbox, CodeEditor, CodeView, Dialog, DialogAction, Dropdown, EmptyState,
+    Kbd, ListRow, Severity, Tag, TextField, VirtualList,
 };
-use archipel_kit::parts::{Slot, Surface};
+use archipel_kit::parts::Slot;
 use archipel_kit::tokens::typography;
 use archipel_kit::{Glyph, Theme, Tone, egui};
 use egui::{Key, Modifiers, Ui, vec2};
+
+/// Height of the environment editor.
+const ENV_EDITOR_HEIGHT: f32 = 220.0;
+/// Height of the import editor.
+const IMPORT_EDITOR_HEIGHT: f32 = 240.0;
+/// Height of the generated code.
+const CODE_VIEW_HEIGHT: f32 = 330.0;
 use nexus_http_core::codegen::{self, Target};
 use nexus_http_core::exec::{PrepareOptions, prepare};
 use nexus_http_core::import::{self, ImportError};
 use nexus_http_core::model::{Environment, Id, Protocol};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 pub enum Overlay {
@@ -115,18 +122,6 @@ fn keep_enter_in_editor(ui: &Ui, editor: egui::Id) {
     if ui.memory(|m| m.has_focus(editor)) {
         ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
     }
-}
-
-/// A boxed area for the legacy code widgets.
-fn code_box(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
-    Surface::Field
-        .frame(ui.ctx())
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_height(height);
-            ui.set_width(ui.available_width());
-            add(ui);
-        });
 }
 
 // ------------------------------------------------------------------ switcher
@@ -404,12 +399,16 @@ fn env_editor(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, editor
         }
     }
     ui.add_space(8.0);
-    let vars = Map::new();
-    let mut edited = false;
-    // TODO(kit CodeEditor): replace with the kit code editor once it is on kit main.
-    code_box(ui, 220.0, |ui| {
-        edited = code_editor(ui, &mut local.env_text, Syntax::Json, &vars, editor_id).changed();
-    });
+    let edited = ui
+        .add(
+            CodeEditor::new(&mut local.env_text)
+                .id(editor_id)
+                .label("Environment variables (JSON)")
+                .highlighter(&Json)
+                .line_numbers(true)
+                .height(ENV_EDITOR_HEIGHT),
+        )
+        .changed();
     if edited {
         match serde_json::from_str::<Value>(&local.env_text) {
             Ok(Value::Object(map)) => {
@@ -484,14 +483,18 @@ fn import_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut Overla
                 &mut local.import_merge,
                 "Add to the current workspace",
             ));
-            let vars = Map::new();
-            // TODO(kit CodeEditor): replace with the kit code editor once it is on kit main.
-            code_box(ui, 240.0, |ui| {
-                if focus {
-                    ui.memory_mut(|m| m.request_focus(editor_id));
-                }
-                code_editor(ui, &mut local.import_text, Syntax::Json, &vars, editor_id);
-            });
+            if focus {
+                ui.memory_mut(|m| m.request_focus(editor_id));
+            }
+            ui.add(
+                CodeEditor::new(&mut local.import_text)
+                    .id(editor_id)
+                    .label("Collection to import")
+                    .placeholder("Paste a Postman, Insomnia or OpenAPI document, or a curl command")
+                    .highlighter(&Json)
+                    .line_numbers(true)
+                    .height(IMPORT_EDITOR_HEIGHT),
+            );
             match &local.import_result {
                 Some(Ok(text)) => {
                     Banner::new(Severity::Success, text.as_str()).show(ui);
@@ -645,11 +648,12 @@ fn code_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut OverlayU
                             .color(Theme::colors(ui.ctx()).text_secondary),
                         );
                         ui.add_space(6.0);
-                        // TODO(kit CodeEditor): replace with the kit code view once it is on
-                        // kit main.
-                        code_box(ui, 330.0, |ui| {
-                            code_view(ui, code, Syntax::Plain, "generated");
-                        });
+                        CodeView::new(code)
+                            .label("Generated code")
+                            .highlighter(&PlainText)
+                            .line_numbers(true)
+                            .height(CODE_VIEW_HEIGHT)
+                            .show(ui);
                     }
                     Err(e) => {
                         Banner::new(Severity::Error, e.as_str()).show(ui);

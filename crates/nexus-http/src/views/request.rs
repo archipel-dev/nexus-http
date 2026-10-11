@@ -1,21 +1,44 @@
-//! Request editor: URL bar with method picker and Send, and the Params, Body,
-//! Auth, Headers, Tests and Settings tabs.
+//! Request editor: an island titled with the request's name, its sections as content tabs
+//! (Params, Body, Auth, Headers, Tests, Settings), the URL bar and the selected section.
+//! Built only from kit components; the editing rules are `nexus_http_core::editing`.
 
 use crate::state::{NexusState, RequestTab};
-use crate::theme::{Palette, semibold};
-use crate::widgets::{
-    self, Icon, Syntax, caption, code_editor, field_frame, icon_button, kv_table, primary_button,
-    tab_strip, template_field,
+use crate::views::template::Templates;
+use archipel_kit::behaviour::WidgetExt;
+use archipel_kit::components::{
+    Button, Checkbox, CodeEditor, Dropdown, EmptyState, FieldLabel, Form, FormUi, IconButton,
+    KeyValueTable, Panel, Radio, TextField, Tooltip,
 };
-use egui::{CornerRadius, RichText, Sense, Ui, vec2};
+use archipel_kit::parts::Tone;
+use archipel_kit::tokens::size;
+use archipel_kit::{Glyph, Theme};
+use egui::{RichText, Ui};
 use nexus_http_core::assertions::{Assertion, Operator, Source};
+use nexus_http_core::editing::{
+    self, AuthKind, BodyKind, OAUTH2_GRANTS, SourceKind, Target, set_auth_kind, set_body_kind,
+    set_source_kind, set_target,
+};
 use nexus_http_core::model::{
-    ApiKeyLocation, Auth, Body, Id, KeyValue, Method, MultipartField, MultipartValue, OAuth2Config,
+    ApiKeyLocation, Auth, Body, Id, KeyValue, MultipartField, MultipartValue, OAuth2Config,
     OAuth2Grant, Protocol, Request,
 };
-use serde_json::{Map, Value};
 
 pub const URL_FIELD_ID: &str = "nexus.url";
+
+/// Width of the method picker.
+const TARGET_WIDTH: f32 = 96.0;
+/// Width of the Send / Connect / Cancel button.
+const SEND_WIDTH: f32 = 84.0;
+/// Width of the dropdowns of an assertion row.
+const ASSERTION_PICKER_WIDTH: f32 = 120.0;
+/// Width of short argument fields (JSONPath, header name, expected value).
+const ARGUMENT_WIDTH: f32 = 150.0;
+/// Width of a form field in the Auth and Settings sections.
+const FORM_FIELD_WIDTH: f32 = 360.0;
+/// Width of the body type picker.
+const KIND_WIDTH: f32 = 170.0;
+/// Width of the text/file picker of a multipart row.
+const PART_KIND_WIDTH: f32 = 84.0;
 
 /// Actions the request view asks the app to perform.
 #[derive(Default)]
@@ -30,9 +53,19 @@ pub struct RequestActions {
     pub load_grpc_schema: bool,
 }
 
+/// GraphQL schema state handed to the body section.
+#[derive(Default)]
+struct GqlContext {
+    schema: Option<std::sync::Arc<nexus_http_core::graphql::Schema>>,
+    loading: bool,
+    error: Option<String>,
+    fetch: bool,
+}
+
+type GrpcSchemaView = (Vec<nexus_http_core::grpc::MethodInfo>, bool, Option<String>);
+
 pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, actions: &mut RequestActions) {
-    let pal = Palette::of(ui);
-    let vars = variables_for(state, id);
+    let templates = Templates::for_request(ui, state, id);
     let sending = state.sending_id() == Some(id);
     let connected = state.stream_connected(id);
     let mut gql = match state.schemas.get(id) {
@@ -48,161 +81,79 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, actions: &mut RequestA
         .grpc_schemas
         .get(id)
         .map(|s| (s.methods.clone(), s.loading(), s.error.clone()));
-    let tab = &mut state.request_tab;
-    let mut current_tab = *tab;
+    let mut tab = RequestTab::ALL
+        .iter()
+        .position(|t| *t == state.request_tab)
+        .unwrap_or(0);
     let Some(request) = state.request_mut(id) else {
         return;
     };
+    let labels: Vec<String> = RequestTab::ALL
+        .iter()
+        .map(|t| tab_label(*t, request))
+        .collect();
+    let title = request.name.clone();
     let mut changed = false;
+    let mut generate_code = false;
+    // The section shown is the one selected when the frame began; a click on another tab
+    // shows it on the next frame, which the click requests.
+    let section = RequestTab::ALL[tab.min(RequestTab::ALL.len() - 1)];
 
-    // ---------------------------------------------------------------- URL bar
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        let bar_width = ui.available_width() - 12.0;
-        let frame = field_frame(&pal).inner_margin(egui::Margin::symmetric(4, 3));
-        frame.show(ui, |ui| {
-            ui.set_width(bar_width - 10.0);
-            ui.horizontal(|ui| {
-                changed |= method_picker(ui, &mut request.method, &mut request.protocol);
-                let (sep, _) = ui.allocate_exact_size(vec2(1.0, 22.0), Sense::hover());
-                ui.painter().rect_filled(sep, 0.0, pal.border);
-                let send_w = if request.protocol.is_http() {
-                    86.0
-                } else {
-                    112.0
-                };
-                let url_w = ui.available_width() - send_w - 34.0;
-                let hint = match request.protocol {
-                    Protocol::Http => "Enter a URL, paste a curl command, or use {{ base_url }}",
-                    Protocol::WebSocket => "ws://host/socket or wss://…",
-                    Protocol::Sse => "https://host/events",
-                    Protocol::Grpc => "grpc://host:50051 or grpcs://host:443",
-                };
-                let resp = template_field(
-                    ui,
-                    &mut request.url,
-                    hint,
-                    &vars,
-                    url_w,
-                    egui::Id::new(URL_FIELD_ID),
-                );
-                if resp.changed() {
-                    changed = true;
-                    sync_params_from_url(request);
-                }
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    actions.send = true;
-                }
-                if icon_button(ui, Icon::Code, pal.weak, "Generate code").clicked() {
-                    actions.generate_code = true;
-                }
-                if !request.protocol.is_http() {
-                    if connected {
-                        if widgets::secondary_button(ui, "Disconnect").clicked() {
-                            actions.disconnect = true;
-                        }
-                    } else if primary_button(ui, "Connect", true)
-                        .on_hover_text("Connect (Ctrl+Enter)")
-                        .clicked()
-                    {
-                        actions.connect = true;
-                    }
-                } else if sending {
-                    if widgets::secondary_button(ui, "Cancel").clicked() {
-                        actions.cancel = true;
-                    }
-                } else if primary_button(ui, "Send", true)
-                    .on_hover_text("Send (Ctrl+Enter)")
-                    .clicked()
-                {
-                    actions.send = true;
-                }
-            });
-        });
-    });
-    if request.protocol == Protocol::Grpc {
-        changed |= grpc_bar(ui, request, &vars, grpc_schema.as_ref(), actions);
-    }
-    ui.add_space(4.0);
-
-    // ---------------------------------------------------------------- tabs
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        let counts = TabCounts::of(request);
-        tab_strip(
-            ui,
-            &mut current_tab,
-            &RequestTab::ALL,
-            |t| match t {
-                RequestTab::Body
-                    if matches!(request.protocol, Protocol::WebSocket | Protocol::Grpc) =>
-                {
-                    "Message".to_owned()
-                }
-                RequestTab::Body => match &request.body {
-                    Body::None => "Body".to_owned(),
-                    other => other.label().to_owned(),
-                },
-                RequestTab::Auth => match &request.auth {
-                    Auth::None | Auth::Inherit => "Auth".to_owned(),
-                    Auth::Basic { .. } => "Basic".to_owned(),
-                    Auth::Bearer { .. } => "Bearer".to_owned(),
-                    Auth::ApiKey { .. } => "API Key".to_owned(),
-                    Auth::Digest { .. } => "Digest".to_owned(),
-                    Auth::OAuth2(_) => "OAuth 2.0".to_owned(),
-                    Auth::AwsSigV4 { .. } => "AWS SigV4".to_owned(),
-                },
-                other => other.label().to_owned(),
-            },
-            |t| counts.badge(t),
-        );
-    });
-    let line_y = ui.cursor().top();
-    ui.painter()
-        .hline(ui.max_rect().x_range(), line_y, pal.hairline());
-    ui.add_space(8.0);
-
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(12, 0))
+    Panel::new(title)
+        .tabs(&labels, &mut tab)
+        .hover_actions(true)
+        .actions(|ui| {
+            let code =
+                IconButton::new(Glyph::Code, "Generate code").with(Tooltip::new("Generate code"));
+            generate_code |= ui.add(code).clicked();
+        })
+        .padded(true)
         .show(ui, |ui| {
-            ui.set_min_height(ui.available_height());
-            match current_tab {
-                RequestTab::Params => {
-                    caption(ui, "Query parameters");
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("params")
-                        .show(ui, |ui| {
-                            if kv_table(ui, &mut request.params, "params", "Add parameter", &vars) {
-                                changed = true;
-                            }
-                        });
-                }
-                RequestTab::Headers => {
-                    caption(ui, "Headers");
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("headers")
-                        .show(ui, |ui| {
-                            if kv_table(ui, &mut request.headers, "headers", "Add header", &vars) {
-                                changed = true;
-                            }
-                        });
-                }
-                RequestTab::Body
-                    if matches!(request.protocol, Protocol::WebSocket | Protocol::Grpc) =>
-                {
-                    changed |= message_tab(ui, &mut request.body, &vars, connected, actions);
-                }
-                RequestTab::Body => changed |= body_tab(ui, &mut request.body, &vars, &mut gql),
-                RequestTab::Auth => changed |= auth_tab(ui, &mut request.auth, &vars, actions),
-                RequestTab::Tests => changed |= tests_tab(ui, &mut request.assertions),
-                RequestTab::Settings => changed |= settings_tab(ui, request),
+            ui.spacing_mut().item_spacing.y = size::SECTION_SPACING;
+            changed |= url_bar(ui, request, &templates, sending, connected, actions);
+            if request.protocol == Protocol::Grpc {
+                changed |= grpc_bar(ui, request, &templates, grpc_schema.as_ref(), actions);
             }
+            egui::ScrollArea::vertical()
+                .id_salt(("request-section", section.label()))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    changed |= match section {
+                        RequestTab::Params => rows_table(
+                            ui,
+                            "params",
+                            &mut request.params,
+                            "Add parameter",
+                            &templates,
+                        ),
+                        RequestTab::Headers => rows_table(
+                            ui,
+                            "headers",
+                            &mut request.headers,
+                            "Add header",
+                            &templates,
+                        ),
+                        RequestTab::Body if is_message(request.protocol) => {
+                            message_section(ui, &mut request.body, &templates, connected, actions)
+                        }
+                        RequestTab::Body => {
+                            body_section(ui, &mut request.body, &templates, &mut gql)
+                        }
+                        RequestTab::Auth => {
+                            auth_section(ui, &mut request.auth, &templates, actions)
+                        }
+                        RequestTab::Tests => tests_section(ui, &mut request.assertions),
+                        RequestTab::Settings => settings_section(ui, request),
+                    };
+                });
         });
 
-    state.request_tab = current_tab;
+    actions.generate_code |= generate_code;
+    let picked = RequestTab::ALL[tab.min(RequestTab::ALL.len() - 1)];
+    if picked != section {
+        ui.ctx().request_repaint();
+    }
+    state.request_tab = picked;
     if gql.fetch {
         state.fetch_schema(id);
     }
@@ -211,416 +162,301 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, actions: &mut RequestA
     }
 }
 
-/// Variables visible to request `id`, for highlighting and autocomplete.
-pub fn variables_for(state: &NexusState, id: &Id) -> Map<String, Value> {
-    let ws = &state.workspace;
-    let folders = ws.find_request(id).map(|(f, _)| f).unwrap_or_default();
-    nexus_http_core::template::merged_variables(
-        &ws.base_environment,
-        ws.active_environment(),
-        &folders,
-    )
+fn is_message(protocol: Protocol) -> bool {
+    matches!(protocol, Protocol::WebSocket | Protocol::Grpc)
 }
 
-/// GraphQL schema state handed to the body tab.
-#[derive(Default)]
-struct GqlContext {
-    schema: Option<std::sync::Arc<nexus_http_core::graphql::Schema>>,
-    loading: bool,
-    error: Option<String>,
-    fetch: bool,
-}
-
-struct TabCounts {
-    params: usize,
-    headers: usize,
-    tests: usize,
-}
-
-impl TabCounts {
-    fn of(r: &Request) -> Self {
-        Self {
-            params: r.params.iter().filter(|p| p.enabled).count(),
-            headers: r.headers.iter().filter(|p| p.enabled).count(),
-            tests: r.assertions.iter().filter(|a| a.enabled).count(),
+/// A section tab's label: what the section holds, and how many rows are on.
+fn tab_label(tab: RequestTab, request: &Request) -> String {
+    let count = |n: usize| {
+        if n > 0 {
+            format!("{} {n}", tab.label())
+        } else {
+            tab.label().to_owned()
         }
-    }
-
-    fn badge(&self, tab: RequestTab) -> Option<String> {
-        let n = match tab {
-            RequestTab::Params => self.params,
-            RequestTab::Headers => self.headers,
-            RequestTab::Tests => self.tests,
-            _ => 0,
-        };
-        (n > 0).then(|| n.to_string())
+    };
+    match tab {
+        RequestTab::Body if is_message(request.protocol) => "Message".to_owned(),
+        RequestTab::Body => match &request.body {
+            Body::None => "Body".to_owned(),
+            other => BodyKind::of(other).label().to_owned(),
+        },
+        RequestTab::Auth => match AuthKind::of(&request.auth) {
+            AuthKind::None | AuthKind::Inherit => "Auth".to_owned(),
+            kind => kind.label().to_owned(),
+        },
+        RequestTab::Params => count(request.params.iter().filter(|p| p.enabled).count()),
+        RequestTab::Headers => count(request.headers.iter().filter(|p| p.enabled).count()),
+        RequestTab::Tests => count(request.assertions.iter().filter(|a| a.enabled).count()),
+        RequestTab::Settings => tab.label().to_owned(),
     }
 }
 
-type GrpcSchemaView = (Vec<nexus_http_core::grpc::MethodInfo>, bool, Option<String>);
+/// The tone of a target's name: the method's color, or the protocol's.
+pub fn target_tone(target: &Target) -> Tone {
+    match target {
+        Target::Http(m) => Tone::method(&m.to_string()),
+        Target::WebSocket => Tone::Accent,
+        Target::Sse => Tone::Link,
+        Target::Grpc => Tone::Success,
+    }
+}
 
-/// The gRPC row under the URL bar: schema source (`.proto` file or reflection)
-/// and the method to call.
+/// Method or protocol, URL with `{{ variables }}`, and Send.
+fn url_bar(
+    ui: &mut Ui,
+    request: &mut Request,
+    templates: &Templates,
+    sending: bool,
+    connected: bool,
+    actions: &mut RequestActions,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+        let mut target = Target::of(request);
+        ui.add(
+            Dropdown::new("nexus.target", &mut target, Target::all())
+                .separators([Target::protocols_start()])
+                .tone(target_tone)
+                .label("Method")
+                .width(TARGET_WIDTH),
+        );
+        changed |= set_target(request, target);
+
+        let url_width = (ui.available_width() - SEND_WIDTH - size::TOOLBAR_GAP).max(0.0);
+        let out = templates
+            .field(&mut request.url)
+            .id(egui::Id::new(URL_FIELD_ID))
+            .name("URL")
+            .placeholder(editing::url_hint(request.protocol))
+            .width(url_width)
+            .show(ui);
+        if out.response.changed() {
+            changed = true;
+            editing::take_query_into_params(request);
+        }
+        if out.submitted {
+            actions.send = true;
+        }
+
+        let send = |label: &str| {
+            Button::primary(label)
+                .min_width(SEND_WIDTH)
+                .with(Tooltip::new(label).shortcut("Ctrl+Enter"))
+        };
+        if !request.protocol.is_http() {
+            if connected {
+                actions.disconnect |= ui
+                    .add(Button::secondary("Disconnect").min_width(SEND_WIDTH))
+                    .clicked();
+            } else {
+                actions.connect |= ui.add(send("Connect")).clicked();
+            }
+        } else if sending {
+            actions.cancel |= ui
+                .add(Button::secondary("Cancel").min_width(SEND_WIDTH))
+                .clicked();
+        } else {
+            actions.send |= ui.add(send("Send")).clicked();
+        }
+    });
+    changed
+}
+
+/// The gRPC row under the URL bar: the schema source and the method to call.
 fn grpc_bar(
     ui: &mut Ui,
     request: &mut Request,
-    vars: &Map<String, Value>,
+    templates: &Templates,
     schema: Option<&GrpcSchemaView>,
     actions: &mut RequestActions,
 ) -> bool {
-    let pal = Palette::of(ui);
     let mut changed = false;
     let loading = schema.is_some_and(|s| s.1);
-    ui.add_space(6.0);
+    let methods = schema.map(|s| s.0.as_slice()).unwrap_or(&[]);
     ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        let half = (ui.available_width() - 150.0) / 2.0;
-        changed |= template_field(
-            ui,
-            &mut request.grpc.proto_file,
-            ".proto file (empty: server reflection)",
-            vars,
-            half,
-            egui::Id::new("nexus.grpc.proto"),
-        )
-        .changed();
-        changed |= template_field(
-            ui,
-            &mut request.grpc.method,
-            "package.Service/Method",
-            vars,
-            half,
-            egui::Id::new("nexus.grpc.method"),
-        )
-        .changed();
-        let methods = schema.map(|s| s.0.as_slice()).unwrap_or(&[]);
+        ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+        let half = (ui.available_width() - SEND_WIDTH - 2.0 * size::TOOLBAR_GAP) / 2.0;
+        changed |= ui
+            .add(
+                templates
+                    .field(&mut request.grpc.proto_file)
+                    .name(".proto file")
+                    .placeholder(".proto file (empty: server reflection)")
+                    .width(half),
+            )
+            .changed();
+        if methods.is_empty() {
+            changed |= ui
+                .add(
+                    templates
+                        .field(&mut request.grpc.method)
+                        .name("gRPC method")
+                        .placeholder("package.Service/Method")
+                        .width(half),
+                )
+                .changed();
+        } else {
+            let mut picked = request.grpc.method.clone();
+            let names: Vec<String> = methods.iter().map(|m| m.name.clone()).collect();
+            ui.add(
+                Dropdown::new("nexus.grpc.method", &mut picked, names)
+                    .label("gRPC method")
+                    .width(half),
+            );
+            if picked != request.grpc.method
+                && let Some(method) = methods.iter().find(|m| m.name == picked)
+            {
+                editing::pick_grpc_method(request, &method.name, &method.template);
+                changed = true;
+            }
+        }
         let label = if loading { "Loading…" } else { "Methods" };
-        let button = widgets::secondary_button(ui, label);
-        if button.clicked() && !loading {
-            actions.load_grpc_schema = true;
-        }
-        if !methods.is_empty() {
-            egui::Popup::menu(&button)
-                .id(egui::Id::new("nexus.grpc.methods"))
-                .width(320.0)
-                .show(|ui| {
-                    for m in methods {
-                        let text = format!("{}  ·  {}", m.name, m.kind());
-                        if ui
-                            .selectable_label(request.grpc.method == m.name, text)
-                            .clicked()
-                        {
-                            request.grpc.method = m.name.clone();
-                            if matches!(&request.body, Body::None)
-                                || matches!(&request.body, Body::Json { text } if text.trim().is_empty())
-                            {
-                                request.body = Body::Json {
-                                    text: m.template.clone(),
-                                };
-                            }
-                            changed = true;
-                        }
-                    }
-                });
-        }
+        let load = Button::secondary(label)
+            .min_width(SEND_WIDTH)
+            .enabled(!loading)
+            .with(Tooltip::new(
+                "Ask the server (reflection) or the .proto file for its methods",
+            ));
+        actions.load_grpc_schema |= ui.add(load).clicked();
     });
     if let Some((_, _, Some(error))) = schema {
-        ui.horizontal(|ui| {
-            ui.add_space(14.0);
-            ui.label(RichText::new(error).size(12.0).color(pal.error));
-        });
+        problem(ui, error);
     }
     changed
 }
 
-fn method_picker(ui: &mut Ui, method: &mut Method, protocol: &mut Protocol) -> bool {
-    let pal = Palette::of(ui);
-    let font = semibold(ui, 13.0);
-    let (text, color) = match protocol {
-        Protocol::Http => (method.as_str().to_owned(), pal.method(method)),
-        Protocol::WebSocket => ("WS".to_owned(), pal.syntax_number),
-        Protocol::Sse => ("SSE".to_owned(), pal.info),
-        Protocol::Grpc => ("gRPC".to_owned(), pal.success),
+/// A line of text in the warning color: a problem with the input above it.
+pub fn problem(ui: &mut Ui, text: &str) {
+    let colors = Theme::colors(ui.ctx());
+    ui.label(RichText::new(text).color(Tone::Warning.color(&colors)));
+}
+
+/// Name/value rows with `{{ variables }}` in the values: params, headers, form fields.
+fn rows_table(
+    ui: &mut Ui,
+    id: &str,
+    rows: &mut Vec<KeyValue>,
+    placeholder: &str,
+    templates: &Templates,
+) -> bool {
+    let out = KeyValueTable::with_fields(
+        id,
+        rows,
+        |r| &mut r.enabled,
+        |r| &mut r.name,
+        |r| &mut r.value,
+    )
+    .key_placeholder(placeholder)
+    .value_placeholder("value")
+    .value_cell(|ui, cell| {
+        ui.add(
+            templates
+                .field(cell.text)
+                .placeholder(cell.placeholder)
+                .name(cell.name)
+                .width(cell.width)
+                .enabled(!cell.read_only),
+        )
+    })
+    .show(ui);
+    !out.changes.is_empty()
+}
+
+/// The editor of a body or message, filling the section.
+fn code_editor(ui: &mut Ui, text: &mut String, templates: &Templates, json: bool) -> bool {
+    let editor = CodeEditor::new(text)
+        .label("Body")
+        .line_numbers(true)
+        .height(ui.available_height().max(size::CONTROL_HEIGHT * 6.0));
+    let editor = if json {
+        editor.highlighter(&templates.json)
+    } else {
+        editor.highlighter(&templates.plain)
     };
-    let galley = ui.painter().layout_no_wrap(text, font.clone(), color);
-    let (rect, resp) =
-        ui.allocate_exact_size(vec2(galley.size().x.max(44.0) + 30.0, 26.0), Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), pal.hover);
-    }
-    ui.painter().galley(
-        egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        pal.text,
-    );
-    let chevron = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - 11.0, rect.center().y),
-        vec2(10.0, 10.0),
-    );
-    widgets::paint_icon(ui.painter(), chevron, Icon::Chevron(true), pal.weak);
+    ui.add(editor).changed()
+}
+
+fn body_section(ui: &mut Ui, body: &mut Body, templates: &Templates, gql: &mut GqlContext) -> bool {
     let mut changed = false;
-    egui::Popup::menu(&resp).width(170.0).show(|ui| {
-        for m in Method::COMMON {
-            let label = RichText::new(m.as_str())
-                .font(semibold(ui, 12.5))
-                .color(pal.method(&m));
-            if ui
-                .selectable_label(protocol.is_http() && *method == m, label)
-                .clicked()
-            {
-                *method = m;
-                *protocol = Protocol::Http;
-                changed = true;
-            }
-        }
-        ui.separator();
-        for (p, label, color) in [
-            (Protocol::WebSocket, "WebSocket", pal.syntax_number),
-            (Protocol::Sse, "Server-Sent Events", pal.info),
-            (Protocol::Grpc, "gRPC", pal.success),
-        ] {
-            let text = RichText::new(label).font(semibold(ui, 12.5)).color(color);
-            if ui.selectable_label(*protocol == p, text).clicked() {
-                *protocol = p;
-                *method = Method::Get;
-                changed = true;
-            }
-        }
-    });
-    changed
-}
-
-/// Moves `?a=b` typed into the URL into the params table.
-fn sync_params_from_url(request: &mut Request) {
-    let Some((base, query)) = request.url.split_once('?') else {
-        return;
-    };
-    if query.contains("{{") && !query.contains("}}") {
-        return; // still typing a template
-    }
-    let base = base.to_owned();
-    for pair in query.split('&').filter(|p| !p.is_empty()) {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        request.params.push(KeyValue::new(name, value));
-    }
-    request.url = base;
-}
-
-// -------------------------------------------------------------------- body
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BodyKind {
-    None,
-    Json,
-    Xml,
-    Text,
-    Form,
-    Multipart,
-    Binary,
-    GraphQl,
-}
-
-impl BodyKind {
-    const ALL: [BodyKind; 8] = [
-        BodyKind::Json,
-        BodyKind::Xml,
-        BodyKind::Text,
-        BodyKind::Form,
-        BodyKind::Multipart,
-        BodyKind::GraphQl,
-        BodyKind::Binary,
-        BodyKind::None,
-    ];
-
-    fn of(body: &Body) -> Self {
-        match body {
-            Body::None => BodyKind::None,
-            Body::Json { .. } => BodyKind::Json,
-            Body::Xml { .. } => BodyKind::Xml,
-            Body::Text { .. } => BodyKind::Text,
-            Body::FormUrlEncoded { .. } => BodyKind::Form,
-            Body::Multipart { .. } => BodyKind::Multipart,
-            Body::Binary { .. } => BodyKind::Binary,
-            Body::GraphQl { .. } => BodyKind::GraphQl,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            BodyKind::None => "No Body",
-            BodyKind::Json => "JSON",
-            BodyKind::Xml => "XML",
-            BodyKind::Text => "Plain Text",
-            BodyKind::Form => "Form URL Encoded",
-            BodyKind::Multipart => "Multipart Form",
-            BodyKind::Binary => "Binary File",
-            BodyKind::GraphQl => "GraphQL",
-        }
-    }
-
-    /// Converts the body, carrying text over where it makes sense.
-    fn convert(self, body: &Body) -> Body {
-        let text = match body {
-            Body::Json { text } | Body::Xml { text } | Body::Text { text, .. } => text.clone(),
-            _ => String::new(),
-        };
-        let fields = match body {
-            Body::FormUrlEncoded { fields } => fields.clone(),
-            Body::Multipart { fields } => fields
-                .iter()
-                .filter_map(|f| match &f.value {
-                    MultipartValue::Text { value } => Some(KeyValue {
-                        enabled: f.enabled,
-                        ..KeyValue::new(&f.name, value)
-                    }),
-                    MultipartValue::File { .. } => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        match self {
-            BodyKind::None => Body::None,
-            BodyKind::Json => Body::Json { text },
-            BodyKind::Xml => Body::Xml { text },
-            BodyKind::Text => Body::Text {
-                text,
-                content_type: None,
-            },
-            BodyKind::Form => Body::FormUrlEncoded { fields },
-            BodyKind::Multipart => Body::Multipart {
-                fields: fields
-                    .into_iter()
-                    .map(|kv| MultipartField {
-                        name: kv.name,
-                        value: MultipartValue::Text { value: kv.value },
-                        enabled: kv.enabled,
-                    })
-                    .collect(),
-            },
-            BodyKind::Binary => Body::Binary {
-                path: String::new(),
-            },
-            BodyKind::GraphQl => Body::GraphQl {
-                query: if text.is_empty() {
-                    "query {\n  \n}".into()
-                } else {
-                    text
-                },
-                variables: String::new(),
-                operation_name: None,
-            },
-        }
-    }
-}
-
-fn body_tab(ui: &mut Ui, body: &mut Body, vars: &Map<String, Value>, gql: &mut GqlContext) -> bool {
-    let pal = Palette::of(ui);
-    let mut changed = false;
-    let current = BodyKind::of(body);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for kind in BodyKind::ALL {
-            let selected = kind == current;
-            let text = RichText::new(kind.label()).size(12.0).color(if selected {
-                pal.strong
-            } else {
-                pal.weak
-            });
-            let resp = ui
-                .add(egui::Button::selectable(selected, text).corner_radius(CornerRadius::same(5)));
-            if resp.clicked() && !selected {
-                *body = kind.convert(body);
-                changed = true;
-            }
-        }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+        let mut kind = BodyKind::of(body);
+        ui.add(
+            Dropdown::new("nexus.body.kind", &mut kind, BodyKind::ALL)
+                .separators([BodyKind::ALL.len() - 1])
+                .label("Body type")
+                .width(KIND_WIDTH),
+        );
+        changed |= set_body_kind(body, kind);
         if let Body::Json { text } = body {
-            ui.add_space(8.0);
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("Beautify").size(12.0).color(pal.accent))
-                        .frame(false),
-                )
-                .on_hover_text("Re-indent the JSON")
-                .clicked()
-                && let Ok(v) = serde_json::from_str::<Value>(text)
-                && let Ok(pretty) = serde_json::to_string_pretty(&v)
+            let beautify = Button::ghost("Beautify").with(Tooltip::new("Re-indent the JSON"));
+            if ui.add(beautify).clicked()
+                && let Some(pretty) = editing::beautify_json(text)
             {
                 *text = pretty;
                 changed = true;
             }
         }
     });
-    ui.add_space(8.0);
     match body {
         Body::None => {
-            widgets::empty_state(ui, "No body", "Pick a body type above to send a payload.")
+            EmptyState::new("No body")
+                .icon(Glyph::FileText)
+                .hint("Pick a body type to send a payload.")
+                .show(ui);
         }
         Body::Json { text } => {
-            if !text.trim().is_empty()
-                && !nexus_http_core::template::has_templates(text)
-                && let Err(e) = serde_json::from_str::<Value>(text)
-            {
-                ui.label(
-                    RichText::new(format!("Invalid JSON: {e}"))
-                        .size(11.5)
-                        .color(pal.warning),
-                );
+            if let Some(message) = editing::json_problem(text) {
+                problem(ui, &message);
             }
-            changed |= editor_box(ui, text, Syntax::Json, vars, "json");
+            changed |= code_editor(ui, text, templates, true);
         }
-        Body::Xml { text } => changed |= editor_box(ui, text, Syntax::Plain, vars, "xml"),
+        Body::Xml { text } => changed |= code_editor(ui, text, templates, false),
         Body::Text { text, content_type } => {
-            ui.horizontal(|ui| {
-                caption(ui, "Content-Type");
-                let mut ct = content_type.clone().unwrap_or_default();
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut ct)
-                            .hint_text("text/plain")
-                            .desired_width(220.0),
-                    )
-                    .changed()
-                {
-                    *content_type = (!ct.trim().is_empty()).then_some(ct);
-                    changed = true;
-                }
+            Form::new().show(ui, |form| {
+                form.row("Content-Type:", |ui| {
+                    let mut value = content_type.clone().unwrap_or_default();
+                    let edit = ui.add(
+                        TextField::new(&mut value)
+                            .name("Content-Type")
+                            .placeholder("text/plain")
+                            .width(FORM_FIELD_WIDTH),
+                    );
+                    if edit.changed() {
+                        *content_type = (!value.trim().is_empty()).then_some(value);
+                        changed = true;
+                    }
+                });
             });
-            ui.add_space(4.0);
-            changed |= editor_box(ui, text, Syntax::Plain, vars, "text");
+            changed |= code_editor(ui, text, templates, false);
         }
         Body::FormUrlEncoded { fields } => {
-            changed |= kv_table(ui, fields, "form", "Add field", vars);
+            changed |= rows_table(ui, "form", fields, "Add field", templates);
         }
-        Body::Multipart { fields } => changed |= multipart(ui, fields, vars),
+        Body::Multipart { fields } => changed |= multipart(ui, fields, templates),
         Body::Binary { path } => {
-            caption(
-                ui,
-                "File sent as the request body (absolute or relative to the project)",
-            );
-            ui.add_space(4.0);
-            field_frame(&pal).show(ui, |ui| {
-                changed |= template_field(
-                    ui,
-                    path,
-                    "path/to/file.bin",
-                    vars,
-                    ui.available_width(),
-                    ui.id().with("binpath"),
-                )
-                .changed();
+            Form::new().show(ui, |form| {
+                form.row("File:", |ui| {
+                    changed |= ui
+                        .add(
+                            templates.field(path).name("File").placeholder(
+                                "path/to/file.bin (absolute or relative to the project)",
+                            ),
+                        )
+                        .changed();
+                });
             });
         }
         Body::GraphQl {
-            query,
-            variables,
-            operation_name: _,
+            query, variables, ..
         } => {
             changed |= crate::graphql_ui::body(
                 ui,
                 query,
                 variables,
-                vars,
+                templates,
                 gql.schema.as_deref(),
                 gql.loading,
                 gql.error.as_deref(),
@@ -631,142 +467,116 @@ fn body_tab(ui: &mut Ui, body: &mut Body, vars: &Map<String, Value>, gql: &mut G
     changed
 }
 
-/// WebSocket message composer.
-fn message_tab(
+/// The message composer of a WebSocket or gRPC request.
+fn message_section(
     ui: &mut Ui,
     body: &mut Body,
-    vars: &Map<String, Value>,
+    templates: &Templates,
     connected: bool,
     actions: &mut RequestActions,
 ) -> bool {
-    let pal = Palette::of(ui);
-    let mut changed = false;
-    if !matches!(body, Body::Json { .. } | Body::Text { .. }) {
-        *body = Body::Json {
-            text: String::new(),
-        };
-        changed = true;
-    }
+    let mut changed = editing::ensure_message_body(body);
     ui.horizontal(|ui| {
-        let is_json = matches!(body, Body::Json { .. });
-        for (label, json) in [("JSON", true), ("Text", false)] {
-            let text = RichText::new(label).size(12.0).color(if is_json == json {
-                pal.strong
-            } else {
-                pal.weak
-            });
-            if ui
-                .add(
-                    egui::Button::selectable(is_json == json, text)
-                        .corner_radius(CornerRadius::same(5)),
-                )
-                .clicked()
-                && is_json != json
-            {
-                *body = if json {
-                    BodyKind::Json.convert(body)
-                } else {
-                    BodyKind::Text.convert(body)
-                };
-                changed = true;
-            }
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if primary_button(ui, "Send message", connected)
-                .on_hover_text(if connected {
-                    "Send (Ctrl+Enter)"
-                } else {
-                    "Connect first"
-                })
-                .clicked()
-            {
-                actions.send_message = true;
-            }
-        });
+        ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+        let mut kind = BodyKind::of(body);
+        ui.add(
+            Dropdown::new("nexus.message.kind", &mut kind, BodyKind::MESSAGE)
+                .label("Message type")
+                .width(KIND_WIDTH),
+        );
+        changed |= set_body_kind(body, kind);
+        let tip = if connected {
+            Tooltip::new("Send message").shortcut("Ctrl+Enter")
+        } else {
+            Tooltip::new("Connect first")
+        };
+        let send = Button::primary("Send message").enabled(connected).with(tip);
+        actions.send_message |= ui.add(send).clicked();
     });
-    ui.add_space(8.0);
     match body {
-        Body::Json { text } => changed |= editor_box(ui, text, Syntax::Json, vars, "wsjson"),
-        Body::Text { text, .. } => changed |= editor_box(ui, text, Syntax::Plain, vars, "wstext"),
+        Body::Json { text } => changed |= code_editor(ui, text, templates, true),
+        Body::Text { text, .. } => changed |= code_editor(ui, text, templates, false),
         _ => {}
     }
     changed
 }
 
-fn editor_box(
-    ui: &mut Ui,
-    text: &mut String,
-    syntax: Syntax,
-    vars: &Map<String, Value>,
-    salt: &str,
-) -> bool {
-    let pal = Palette::of(ui);
-    field_frame(&pal)
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_min_height(ui.available_height() - 16.0);
-            code_editor(ui, text, syntax, vars, ui.id().with(salt)).changed()
-        })
-        .inner
+/// Text or file, as a multipart row's picker shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartKind {
+    Text,
+    File,
 }
 
-fn multipart(ui: &mut Ui, fields: &mut Vec<MultipartField>, vars: &Map<String, Value>) -> bool {
-    let pal = Palette::of(ui);
+impl std::fmt::Display for PartKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PartKind::Text => "Text",
+            PartKind::File => "File",
+        })
+    }
+}
+
+/// Multipart rows: on, name, text or file, value or path, remove.
+fn multipart(ui: &mut Ui, fields: &mut Vec<MultipartField>, templates: &Templates) -> bool {
     let mut changed = false;
     let mut remove = None;
     for (i, field) in fields.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            changed |= ui.checkbox(&mut field.enabled, "").changed();
-            let w = (ui.available_width() - 120.0) / 2.0;
-            changed |= template_field(
-                ui,
-                &mut field.name,
-                "name",
-                vars,
-                w,
-                ui.id().with(("mpn", i)),
-            )
-            .changed();
-            match &mut field.value {
-                MultipartValue::Text { value } => {
-                    changed |=
-                        template_field(ui, value, "value", vars, w, ui.id().with(("mpv", i)))
-                            .changed();
-                }
-                MultipartValue::File { path, .. } => {
-                    ui.label(RichText::new("file").size(11.5).color(pal.weak));
-                    changed |= template_field(
-                        ui,
-                        path,
-                        "path/to/file",
-                        vars,
-                        w - 20.0,
-                        ui.id().with(("mpf", i)),
+        ui.push_id(("multipart", i), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+                let n = i + 1;
+                changed |= ui
+                    .add(
+                        Checkbox::new(&mut field.enabled, format!("Enabled, row {n}"))
+                            .label_visible(false),
                     )
                     .changed();
-                }
-            }
-            let is_file = matches!(field.value, MultipartValue::File { .. });
-            if ui
-                .small_button(if is_file { "Text" } else { "File" })
-                .on_hover_text("Switch between text and file")
-                .clicked()
-            {
-                field.value = if is_file {
-                    MultipartValue::Text {
-                        value: String::new(),
-                    }
-                } else {
-                    MultipartValue::File {
-                        path: String::new(),
-                        content_type: None,
-                    }
+                let fixed = PART_KIND_WIDTH + size::ICON_BUTTON + 4.0 * size::TOOLBAR_GAP;
+                let width = ((ui.available_width() - fixed) / 2.0).max(size::CONTROL_HEIGHT);
+                changed |= ui
+                    .add(
+                        templates
+                            .field(&mut field.name)
+                            .name(format!("Name, row {n}"))
+                            .placeholder("name")
+                            .width(width),
+                    )
+                    .changed();
+                let mut kind = match field.value {
+                    MultipartValue::File { .. } => PartKind::File,
+                    MultipartValue::Text { .. } => PartKind::Text,
                 };
-                changed = true;
-            }
-            if icon_button(ui, Icon::Trash, pal.weak, "Delete").clicked() {
-                remove = Some(i);
-            }
+                ui.add(
+                    Dropdown::new(
+                        ("nexus.multipart.kind", i),
+                        &mut kind,
+                        [PartKind::Text, PartKind::File],
+                    )
+                    .label(format!("Kind, row {n}"))
+                    .width(PART_KIND_WIDTH),
+                );
+                changed |= editing::set_multipart_file(field, kind == PartKind::File);
+                let (value, hint) = match &mut field.value {
+                    MultipartValue::Text { value } => (value, "value"),
+                    MultipartValue::File { path, .. } => (path, "path/to/file"),
+                };
+                changed |= ui
+                    .add(
+                        templates
+                            .field(value)
+                            .name(format!("Value, row {n}"))
+                            .placeholder(hint)
+                            .width(width),
+                    )
+                    .changed();
+                if ui
+                    .add(IconButton::new(Glyph::Close, format!("Remove, row {n}")).small(true))
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
         });
     }
     if let Some(i) = remove {
@@ -774,482 +584,388 @@ fn multipart(ui: &mut Ui, fields: &mut Vec<MultipartField>, vars: &Map<String, V
         changed = true;
     }
     ui.horizontal(|ui| {
-        if ui.button("+ Text field").clicked() {
-            fields.push(MultipartField {
-                name: String::new(),
-                value: MultipartValue::Text {
-                    value: String::new(),
-                },
-                enabled: true,
-            });
-            changed = true;
-        }
-        if ui.button("+ File").clicked() {
-            fields.push(MultipartField {
-                name: String::new(),
-                value: MultipartValue::File {
-                    path: String::new(),
-                    content_type: None,
-                },
-                enabled: true,
-            });
-            changed = true;
-        }
-    });
-    changed
-}
-
-// -------------------------------------------------------------------- auth
-
-/// A scheme button label and a constructor for its default configuration.
-type AuthChoice = (&'static str, fn() -> Auth);
-
-fn auth_tab(
-    ui: &mut Ui,
-    auth: &mut Auth,
-    vars: &Map<String, Value>,
-    actions: &mut RequestActions,
-) -> bool {
-    let pal = Palette::of(ui);
-    let mut changed = false;
-    let kinds: [AuthChoice; 8] = [
-        ("No Auth", || Auth::None),
-        ("Inherit", || Auth::Inherit),
-        ("Basic", || Auth::Basic {
-            username: String::new(),
-            password: String::new(),
-        }),
-        ("Bearer", || Auth::Bearer {
-            token: String::new(),
-            prefix: "Bearer".into(),
-        }),
-        ("API Key", || Auth::ApiKey {
-            key: "X-API-Key".into(),
-            value: String::new(),
-            location: ApiKeyLocation::Header,
-        }),
-        ("Digest", || Auth::Digest {
-            username: String::new(),
-            password: String::new(),
-        }),
-        ("OAuth 2.0", || {
-            Auth::OAuth2(Box::new(OAuth2Config {
-                header_prefix: "Bearer".into(),
-                use_pkce: true,
-                redirect_url: "http://127.0.0.1:8765/callback".into(),
-                ..Default::default()
-            }))
-        }),
-        ("AWS SigV4", || Auth::AwsSigV4 {
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            session_token: String::new(),
-            region: "us-east-1".into(),
-            service: String::new(),
-        }),
-    ];
-    let current = std::mem::discriminant(auth);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (label, make) in &kinds {
-            let candidate = make();
-            let selected = std::mem::discriminant(&candidate) == current;
-            let text = RichText::new(*label).size(12.0).color(if selected {
-                pal.strong
-            } else {
-                pal.weak
-            });
-            if ui
-                .add(egui::Button::selectable(selected, text).corner_radius(CornerRadius::same(5)))
-                .clicked()
-                && !selected
-            {
-                *auth = candidate;
+        ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+        for (label, file) in [("Add text field", false), ("Add file", true)] {
+            if ui.add(Button::secondary(label).icon(Glyph::Plus)).clicked() {
+                fields.push(editing::new_multipart_field(file));
                 changed = true;
             }
         }
     });
-    ui.add_space(12.0);
-    let grid = |ui: &mut Ui, f: &mut dyn FnMut(&mut Ui) -> bool| -> bool {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 8.0;
-            f(ui)
-        })
-        .inner
-    };
-    let field_w = (ui.available_width() - 190.0).clamp(160.0, 520.0);
-    let row = |ui: &mut Ui, label: &str, value: &mut String, hint: &str, secret: bool| -> bool {
-        ui.horizontal(|ui| {
-            widgets::form_label(ui, label, 150.0);
-            field_frame(&pal)
-                .show(ui, |ui| {
-                    if secret && !value.contains("{{") {
-                        ui.add(
-                            egui::TextEdit::singleline(value)
-                                .password(true)
-                                .frame(false)
-                                .desired_width(field_w)
-                                .hint_text(hint),
-                        )
-                    } else {
-                        template_field(ui, value, hint, vars, field_w, ui.id().with(label))
-                    }
-                })
-                .inner
-                .changed()
-        })
-        .inner
-    };
-    match auth {
-        Auth::None => widgets::empty_state(
-            ui,
-            "No authentication",
-            "Pick a scheme above; folders can share auth with Inherit.",
-        ),
-        Auth::Inherit => widgets::empty_state(
-            ui,
-            "Inherited",
-            "This request uses the auth of its nearest folder that defines one.",
-        ),
-        Auth::Basic { username, password } | Auth::Digest { username, password } => {
-            changed |= grid(ui, &mut |ui| {
-                row(ui, "Username", username, "username", false)
-                    | row(ui, "Password", password, "password", true)
-            });
-        }
-        Auth::Bearer { token, prefix } => {
-            changed |= grid(ui, &mut |ui| {
-                row(ui, "Token", token, "token or {{ token }}", false)
-                    | row(ui, "Prefix", prefix, "Bearer", false)
-            });
-        }
-        Auth::ApiKey {
-            key,
-            value,
-            location,
-        } => {
-            changed |= grid(ui, &mut |ui| {
-                let a = row(ui, "Key", key, "X-API-Key", false);
-                let b = row(ui, "Value", value, "value", false);
-                let mut c = false;
-                ui.horizontal(|ui| {
-                    widgets::form_label(ui, "Add to", 150.0);
-                    for (l, loc) in [
+    changed
+}
+
+/// A labelled template field in a form. Secrets are masked unless they hold a variable.
+fn form_field(
+    form: &mut FormUi<'_>,
+    templates: &Templates,
+    label: &str,
+    value: &mut String,
+    hint: &str,
+    secret: bool,
+) -> bool {
+    let masked = secret && !value.contains("{{");
+    form.row(&format!("{label}:"), |ui| {
+        let field = templates
+            .field(value)
+            .name(label)
+            .placeholder(hint)
+            .width(FORM_FIELD_WIDTH)
+            .password(masked);
+        ui.add(field).changed()
+    })
+}
+
+fn auth_section(
+    ui: &mut Ui,
+    auth: &mut Auth,
+    templates: &Templates,
+    actions: &mut RequestActions,
+) -> bool {
+    let mut changed = false;
+    Form::new().show(ui, |form| {
+        form.row("Type:", |ui| {
+            let mut kind = AuthKind::of(auth);
+            ui.add(
+                Dropdown::new("nexus.auth.kind", &mut kind, AuthKind::ALL)
+                    .separators([2])
+                    .label("Auth type")
+                    .width(KIND_WIDTH),
+            );
+            changed |= set_auth_kind(auth, kind);
+        });
+        match auth {
+            Auth::None => {}
+            Auth::Inherit => {
+                form.ui()
+                    .label("This request uses the auth of its nearest folder that defines one.");
+            }
+            Auth::Basic { username, password } | Auth::Digest { username, password } => {
+                changed |= form_field(form, templates, "Username", username, "username", false);
+                changed |= form_field(form, templates, "Password", password, "password", true);
+            }
+            Auth::Bearer { token, prefix } => {
+                changed |= form_field(
+                    form,
+                    templates,
+                    "Token",
+                    token,
+                    "token or {{ token }}",
+                    true,
+                );
+                changed |= form_field(form, templates, "Prefix", prefix, "Bearer", false);
+            }
+            Auth::ApiKey {
+                key,
+                value,
+                location,
+            } => {
+                changed |= form_field(form, templates, "Key", key, "X-API-Key", false);
+                changed |= form_field(form, templates, "Value", value, "value", true);
+                form.radios("Add to", |ui| {
+                    for (label, place) in [
                         ("Header", ApiKeyLocation::Header),
                         ("Query", ApiKeyLocation::Query),
                         ("Cookie", ApiKeyLocation::Cookie),
                     ] {
-                        c |= ui.radio_value(location, loc, l).changed();
+                        changed |= ui.add(Radio::new(location, place, label)).changed();
                     }
                 });
-                a | b | c
-            });
-        }
-        Auth::AwsSigV4 {
-            access_key_id,
-            secret_access_key,
-            session_token,
-            region,
-            service,
-        } => {
-            changed |= grid(ui, &mut |ui| {
-                row(ui, "Access key ID", access_key_id, "AKIA…", false)
-                    | row(ui, "Secret access key", secret_access_key, "secret", true)
-                    | row(ui, "Session token", session_token, "optional", true)
-                    | row(ui, "Region", region, "us-east-1", false)
-                    | row(ui, "Service", service, "execute-api, s3, …", false)
-            });
-        }
-        Auth::OAuth2(cfg) => {
-            let cfg: &mut OAuth2Config = cfg;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Grant type").color(pal.weak));
-                ui.add_space(50.0);
-                for (l, g) in [
-                    ("Authorization Code", OAuth2Grant::AuthorizationCode),
-                    ("Client Credentials", OAuth2Grant::ClientCredentials),
-                    ("Password", OAuth2Grant::Password),
-                    ("Implicit", OAuth2Grant::Implicit),
+            }
+            Auth::AwsSigV4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                region,
+                service,
+            } => {
+                for (label, value, hint, secret) in [
+                    ("Access key ID", access_key_id, "AKIA…", false),
+                    ("Secret access key", secret_access_key, "secret", true),
+                    ("Session token", session_token, "optional", true),
+                    ("Region", region, "us-east-1", false),
+                    ("Service", service, "execute-api, s3, …", false),
                 ] {
-                    changed |= ui.radio_value(&mut cfg.grant, g, l).changed();
+                    changed |= form_field(form, templates, label, value, hint, secret);
                 }
-            });
-            ui.add_space(8.0);
-            let grant = cfg.grant;
-            changed |= grid(ui, &mut |ui| {
-                let mut c = false;
-                if matches!(
-                    grant,
-                    OAuth2Grant::AuthorizationCode | OAuth2Grant::Implicit
-                ) {
-                    c |= row(
-                        ui,
-                        "Authorization URL",
-                        &mut cfg.authorization_url,
-                        "https://…/authorize",
-                        false,
-                    );
-                }
-                if grant != OAuth2Grant::Implicit {
-                    c |= row(
-                        ui,
-                        "Access token URL",
-                        &mut cfg.access_token_url,
-                        "https://…/token",
-                        false,
-                    );
-                }
-                c |= row(ui, "Client ID", &mut cfg.client_id, "client id", false);
-                if grant != OAuth2Grant::Implicit {
-                    c |= row(
-                        ui,
-                        "Client secret",
-                        &mut cfg.client_secret,
-                        "client secret",
-                        true,
-                    );
-                }
-                if grant == OAuth2Grant::Password {
-                    c |= row(ui, "Username", &mut cfg.username, "username", false);
-                    c |= row(ui, "Password", &mut cfg.password, "password", true);
-                }
-                if matches!(
-                    grant,
-                    OAuth2Grant::AuthorizationCode | OAuth2Grant::Implicit
-                ) {
-                    c |= row(
-                        ui,
-                        "Redirect URL",
-                        &mut cfg.redirect_url,
-                        "http://127.0.0.1:8765/callback",
-                        false,
-                    );
-                }
-                c |= row(ui, "Scope", &mut cfg.scope, "read write", false);
-                c |= row(ui, "Audience", &mut cfg.audience, "optional", false);
-                c
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if grant == OAuth2Grant::AuthorizationCode {
-                    changed |= ui.checkbox(&mut cfg.use_pkce, "Use PKCE").changed();
-                }
-                changed |= ui
-                    .checkbox(
-                        &mut cfg.credentials_in_header,
-                        "Send client credentials as Basic auth",
-                    )
-                    .changed();
-            });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if primary_button(ui, "Fetch Token", true).clicked() {
-                    actions.fetch_token = true;
-                }
-                match &cfg.token {
-                    Some(token) => {
-                        let short: String = token.access_token.chars().take(28).collect();
-                        ui.label(
-                            RichText::new(format!("Token {short}…"))
-                                .font(crate::theme::mono(12.0))
-                                .color(pal.success),
-                        );
-                        if ui.small_button("Clear").clicked() {
-                            cfg.token = None;
-                            changed = true;
-                        }
-                    }
-                    None => {
-                        ui.label(RichText::new("No token yet").color(pal.weak));
-                    }
-                }
-            });
+            }
+            Auth::OAuth2(cfg) => changed |= oauth2(form, cfg, templates, actions),
         }
-    }
+    });
     changed
 }
 
-// -------------------------------------------------------------------- tests & settings
-
-fn tests_tab(ui: &mut Ui, assertions: &mut Vec<Assertion>) -> bool {
-    let pal = Palette::of(ui);
+fn oauth2(
+    form: &mut FormUi<'_>,
+    cfg: &mut OAuth2Config,
+    templates: &Templates,
+    actions: &mut RequestActions,
+) -> bool {
     let mut changed = false;
-    caption(
-        ui,
-        "Assertions run after every response and in the collection runner",
+    form.row("Grant type:", |ui| {
+        let labels: Vec<&str> = OAUTH2_GRANTS.iter().map(|(_, l)| *l).collect();
+        let current = OAUTH2_GRANTS
+            .iter()
+            .position(|(g, _)| *g == cfg.grant)
+            .unwrap_or(0);
+        let mut label = labels[current];
+        ui.add(
+            Dropdown::new("nexus.oauth.grant", &mut label, labels.clone())
+                .label("Grant type")
+                .width(FORM_FIELD_WIDTH),
+        );
+        if let Some((grant, _)) = OAUTH2_GRANTS.iter().find(|(_, l)| *l == label)
+            && *grant != cfg.grant
+        {
+            cfg.grant = *grant;
+            changed = true;
+        }
+    });
+    let grant = cfg.grant;
+    let browser = matches!(
+        grant,
+        OAuth2Grant::AuthorizationCode | OAuth2Grant::Implicit
     );
-    ui.add_space(6.0);
+    let mut fields: Vec<(&str, &mut String, &str, bool)> = Vec::new();
+    if browser {
+        fields.push((
+            "Authorization URL",
+            &mut cfg.authorization_url,
+            "https://…/authorize",
+            false,
+        ));
+    }
+    if grant != OAuth2Grant::Implicit {
+        fields.push((
+            "Access token URL",
+            &mut cfg.access_token_url,
+            "https://…/token",
+            false,
+        ));
+    }
+    fields.push(("Client ID", &mut cfg.client_id, "client id", false));
+    if grant != OAuth2Grant::Implicit {
+        fields.push((
+            "Client secret",
+            &mut cfg.client_secret,
+            "client secret",
+            true,
+        ));
+    }
+    if grant == OAuth2Grant::Password {
+        fields.push(("Username", &mut cfg.username, "username", false));
+        fields.push(("Password", &mut cfg.password, "password", true));
+    }
+    if browser {
+        fields.push((
+            "Redirect URL",
+            &mut cfg.redirect_url,
+            "http://127.0.0.1:8765/callback",
+            false,
+        ));
+    }
+    fields.push(("Scope", &mut cfg.scope, "read write", false));
+    fields.push(("Audience", &mut cfg.audience, "optional", false));
+    for (label, value, hint, secret) in fields {
+        changed |= form_field(form, templates, label, value, hint, secret);
+    }
+    if grant == OAuth2Grant::AuthorizationCode {
+        changed |= form
+            .add(
+                Checkbox::new(&mut cfg.use_pkce, "Use PKCE")
+                    .comment("Proof Key for Code Exchange, recommended for every client"),
+            )
+            .changed();
+    }
+    changed |= form
+        .add(Checkbox::new(
+            &mut cfg.credentials_in_header,
+            "Send client credentials as Basic auth",
+        ))
+        .changed();
+    form.fields(|ui| {
+        actions.fetch_token |= ui.add(Button::primary("Fetch token")).clicked();
+        match &cfg.token {
+            Some(token) => {
+                let short: String = token.access_token.chars().take(28).collect();
+                let colors = Theme::colors(ui.ctx());
+                ui.label(
+                    RichText::new(format!("Token {short}…"))
+                        .monospace()
+                        .color(Tone::Success.color(&colors)),
+                );
+                if ui.add(Button::ghost("Clear")).clicked() {
+                    cfg.token = None;
+                    changed = true;
+                }
+            }
+            None => {
+                ui.add(FieldLabel::new("No token yet").enabled(false));
+            }
+        }
+    });
+    changed
+}
+
+fn tests_section(ui: &mut Ui, assertions: &mut Vec<Assertion>) -> bool {
+    let mut changed = false;
     let mut remove = None;
     for (i, a) in assertions.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            changed |= ui.checkbox(&mut a.enabled, "").changed();
-            let source_label = match &a.source {
-                Source::Status => "Status",
-                Source::Header(_) => "Header",
-                Source::JsonPath(_) => "JSONPath",
-                Source::Body => "Body",
-                Source::ResponseTimeMs => "Time (ms)",
-                Source::BodySize => "Size (bytes)",
-            };
-            egui::ComboBox::from_id_salt(("src", i))
-                .selected_text(source_label)
-                .width(100.0)
-                .show_ui(ui, |ui| {
-                    for (label, make) in [
-                        ("Status", Source::Status),
-                        ("Header", Source::Header("content-type".into())),
-                        ("JSONPath", Source::JsonPath("$.".into())),
-                        ("Body", Source::Body),
-                        ("Time (ms)", Source::ResponseTimeMs),
-                        ("Size (bytes)", Source::BodySize),
-                    ] {
-                        if ui.selectable_label(source_label == label, label).clicked() {
-                            a.source = make;
-                            changed = true;
-                        }
-                    }
-                });
-            if let Source::Header(arg) | Source::JsonPath(arg) = &mut a.source {
+        ui.push_id(("assertion", i), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = size::TOOLBAR_GAP;
+                let n = i + 1;
                 changed |= ui
                     .add(
-                        egui::TextEdit::singleline(arg)
-                            .desired_width(140.0)
-                            .font(crate::theme::mono(12.0)),
+                        Checkbox::new(&mut a.enabled, format!("Enabled, assertion {n}"))
+                            .label_visible(false),
                     )
                     .changed();
-            }
-            egui::ComboBox::from_id_salt(("op", i))
-                .selected_text(a.operator.label())
-                .width(120.0)
-                .show_ui(ui, |ui| {
-                    for op in Operator::ALL {
-                        changed |= ui
-                            .selectable_value(&mut a.operator, op, op.label())
-                            .changed();
-                    }
-                });
-            if a.operator.needs_value() {
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut a.expected)
-                            .desired_width(140.0)
-                            .hint_text("expected"),
-                    )
-                    .changed();
-            }
-            if icon_button(ui, Icon::Trash, pal.weak, "Delete").clicked() {
-                remove = Some(i);
-            }
+                let mut kind = SourceKind::of(&a.source);
+                ui.add(
+                    Dropdown::new(("nexus.assert.source", i), &mut kind, SourceKind::ALL)
+                        .label(format!("Source, assertion {n}"))
+                        .width(ASSERTION_PICKER_WIDTH),
+                );
+                changed |= set_source_kind(&mut a.source, kind);
+                if let Source::Header(arg) | Source::JsonPath(arg) = &mut a.source {
+                    changed |= ui
+                        .add(
+                            TextField::new(arg)
+                                .monospace(true)
+                                .name(format!("Argument, assertion {n}"))
+                                .width(ARGUMENT_WIDTH),
+                        )
+                        .changed();
+                }
+                let mut operator = a.operator;
+                ui.add(
+                    Dropdown::new(("nexus.assert.op", i), &mut operator, Operator::ALL)
+                        .label(format!("Operator, assertion {n}"))
+                        .width(ASSERTION_PICKER_WIDTH),
+                );
+                if operator != a.operator {
+                    a.operator = operator;
+                    changed = true;
+                }
+                if a.operator.needs_value() {
+                    changed |= ui
+                        .add(
+                            TextField::new(&mut a.expected)
+                                .name(format!("Expected, assertion {n}"))
+                                .placeholder("expected")
+                                .width(ARGUMENT_WIDTH),
+                        )
+                        .changed();
+                }
+                if ui
+                    .add(IconButton::new(Glyph::Close, format!("Remove assertion {n}")).small(true))
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
         });
     }
     if let Some(i) = remove {
         assertions.remove(i);
         changed = true;
     }
-    ui.add_space(6.0);
-    if ui.button("+ Add assertion").clicked() {
-        assertions.push(Assertion::new(Source::Status, Operator::Equals, "200"));
+    if assertions.is_empty() {
+        EmptyState::new("No assertions")
+            .icon(Glyph::Test)
+            .hint("Assertions run after every response and in the collection runner.")
+            .show(ui);
+    }
+    if ui
+        .add(Button::secondary("Add assertion").icon(Glyph::Plus))
+        .clicked()
+    {
+        assertions.push(editing::new_assertion());
         changed = true;
     }
     changed
 }
 
-fn settings_tab(ui: &mut Ui, request: &mut Request) -> bool {
+fn settings_section(ui: &mut Ui, request: &mut Request) -> bool {
     let mut changed = false;
-    let s = &mut request.settings;
-    let tri = |ui: &mut Ui, label: &str, value: &mut Option<bool>| -> bool {
-        let mut c = false;
-        ui.horizontal(|ui| {
-            widgets::form_label(ui, label, 180.0);
-            for (l, v) in [
-                ("Workspace default", None),
-                ("On", Some(true)),
-                ("Off", Some(false)),
-            ] {
-                c |= ui.radio_value(value, v, l).changed();
+    let timeout_id = ui.id().with(("timeout", request.id.to_string()));
+    Form::new().show(ui, |form| {
+        let settings = &mut request.settings;
+        for (label, value) in [
+            ("Follow redirects", &mut settings.follow_redirects),
+            ("Verify TLS certificates", &mut settings.verify_tls),
+        ] {
+            form.radios(label, |ui| {
+                for (choice, v) in [
+                    ("Workspace default", None),
+                    ("On", Some(true)),
+                    ("Off", Some(false)),
+                ] {
+                    changed |= ui.add(Radio::new(value, v, choice)).changed();
+                }
+            });
+        }
+        form.row("Timeout (ms):", |ui| {
+            // The text stays as typed; the setting takes it once it is a number.
+            let mut text = ui.data_mut(|d| {
+                d.get_temp_mut_or_insert_with(timeout_id, || {
+                    settings
+                        .timeout_ms
+                        .map(|t| t.to_string())
+                        .unwrap_or_default()
+                })
+                .clone()
+            });
+            let edit = ui.add(
+                TextField::new(&mut text)
+                    .name("Timeout (ms)")
+                    .placeholder("workspace default")
+                    .width(ARGUMENT_WIDTH),
+            );
+            if edit.changed() {
+                settings.timeout_ms = editing::parse_timeout_ms(&text);
+                changed = true;
             }
+            ui.data_mut(|d| d.insert_temp(timeout_id, text));
         });
-        c
-    };
-    changed |= tri(ui, "Follow redirects", &mut s.follow_redirects);
-    changed |= tri(ui, "Verify TLS certificates", &mut s.verify_tls);
-    ui.horizontal(|ui| {
-        widgets::form_label(ui, "Timeout (ms)", 180.0);
-        let mut text = s.timeout_ms.map(|t| t.to_string()).unwrap_or_default();
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut text)
-                    .hint_text("workspace default")
-                    .desired_width(140.0),
-            )
+        let mut cookies = !settings.disable_cookies;
+        if form
+            .add(Checkbox::new(&mut cookies, "Send and store cookies"))
             .changed()
         {
-            s.timeout_ms = text.trim().parse().ok();
+            settings.disable_cookies = !cookies;
             changed = true;
         }
+        form.group("Description", |form| {
+            changed |= form
+                .ui()
+                .add(
+                    TextField::new(&mut request.description)
+                        .multiline(4)
+                        .name("Description")
+                        .placeholder("Notes for your team (Markdown)"),
+                )
+                .changed();
+        });
     });
-    ui.horizontal(|ui| {
-        widgets::form_label(ui, "Cookies", 180.0);
-        let mut enabled = !s.disable_cookies;
-        if ui
-            .checkbox(&mut enabled, "Send and store cookies")
-            .changed()
-        {
-            s.disable_cookies = !enabled;
-            changed = true;
-        }
-    });
-    ui.add_space(12.0);
-    caption(ui, "Description");
-    changed |= ui
-        .add(
-            egui::TextEdit::multiline(&mut request.description)
-                .desired_rows(4)
-                .desired_width(f32::INFINITY)
-                .hint_text("Notes for your team (Markdown)"),
-        )
-        .changed();
     changed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nexus_http_core::model::Method;
 
     #[test]
-    fn moves_typed_query_into_params() {
-        let mut r = Request::new("r", Method::Get, "https://x/a?b=1&c");
-        sync_params_from_url(&mut r);
-        assert_eq!(r.url, "https://x/a");
-        assert_eq!(
-            r.params,
-            vec![KeyValue::new("b", "1"), KeyValue::new("c", "")]
-        );
-        let mut typing = Request::new("r", Method::Get, "https://x/a?b={{ va");
-        sync_params_from_url(&mut typing);
-        assert!(typing.params.is_empty());
-    }
-
-    #[test]
-    fn converting_body_kinds_keeps_content() {
-        let json = Body::Json { text: "{}".into() };
-        assert_eq!(
-            BodyKind::Text.convert(&json),
-            Body::Text {
-                text: "{}".into(),
-                content_type: None
-            }
-        );
-        let form = Body::FormUrlEncoded {
-            fields: vec![KeyValue::new("a", "1")],
-        };
-        let Body::Multipart { fields } = BodyKind::Multipart.convert(&form) else {
-            panic!()
-        };
-        assert_eq!(fields[0].name, "a");
-        assert_eq!(
-            BodyKind::of(&BodyKind::GraphQl.convert(&Body::None)),
-            BodyKind::GraphQl
-        );
+    fn tab_labels_count_enabled_rows_and_name_the_body() {
+        let mut r = Request::new("r", Method::Post, "https://x");
+        r.headers.push(KeyValue::new("a", "1"));
+        r.body = Body::Json { text: "{}".into() };
+        assert_eq!(tab_label(RequestTab::Headers, &r), "Headers 1");
+        assert_eq!(tab_label(RequestTab::Params, &r), "Params");
+        assert_eq!(tab_label(RequestTab::Body, &r), "JSON");
+        r.protocol = Protocol::WebSocket;
+        assert_eq!(tab_label(RequestTab::Body, &r), "Message");
     }
 }
