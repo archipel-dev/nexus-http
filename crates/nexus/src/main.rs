@@ -10,6 +10,11 @@
 //! `NEXUS_REQUEST_TAB=<tab>`, `NEXUS_RESPONSE_TAB=<tab>`,
 //! `NEXUS_OVERLAY=env|switcher|import|export|code`, `NEXUS_RUN=<top-level folder or empty>`
 //! opens the collection runner and starts a run.
+//!
+//! `NEXUS_PERF=<out.json>` measures start, frame time, idle CPU and memory and exits
+//! (see `perf.rs` and `docs/performance.md`; use `cargo xtask perf`).
+
+mod perf;
 
 use eframe::egui;
 use nexus_http::NexusApp;
@@ -58,6 +63,7 @@ fn main() -> eframe::Result {
                 sent: false,
                 messages: 0,
                 last_message: 0.0,
+                perf: perf::Perf::from_env(),
             }))
         }),
     )
@@ -69,10 +75,14 @@ struct Host {
     /// Demo: WebSocket messages still to send once connected.
     messages: u32,
     last_message: f64,
+    perf: Option<perf::Perf>,
 }
 
 impl eframe::App for Host {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(perf) = &mut self.perf {
+            perf.update(ctx, &mut self.app);
+        }
         if !self.sent {
             self.sent = true;
             if std::env::var_os("NEXUS_SEND").is_some() {
