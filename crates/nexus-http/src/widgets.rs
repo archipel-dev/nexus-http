@@ -153,9 +153,7 @@ fn json_tokens(job: &mut LayoutJob, text: &str, pal: &Palette, font: FontId) {
     }
 }
 
-/// egui temp-data key holding the workspace's secret variable names, so
-/// completion never previews their values.
-pub const SECRET_KEYS_ID: &str = "nexus-secret-keys";
+pub use crate::state::SECRET_KEYS_ID;
 
 /// Single-line field with template highlighting. Returns the response.
 pub fn template_field(

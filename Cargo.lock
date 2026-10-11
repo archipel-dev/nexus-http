@@ -2832,6 +2832,7 @@ dependencies = [
  "archipel-sdk",
  "egui",
  "nexus-http-core",
+ "serde",
  "serde_json",
  "tempfile",
  "tiny_http",

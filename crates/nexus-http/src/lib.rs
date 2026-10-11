@@ -16,18 +16,23 @@ pub mod widgets;
 
 pub use plugin::NexusHttpPlugin;
 
-use egui::{
-    CornerRadius, CursorIcon, Key, KeyboardShortcut, Modifiers, Rect, Sense, Ui, pos2, vec2,
-};
+use archipel_kit::components::{EmptyState, Kbd, Severity, SplitPane, Toast};
+use archipel_kit::parts::Surface;
+use archipel_kit::tokens::size;
+use archipel_kit::{Glyph, Theme};
+use egui::{Key, KeyboardShortcut, Modifiers, Ui};
 use nexus_http_core::model::{Auth, Item};
 use nexus_http_core::template::Context;
-use state::NexusState;
+use state::{NexusState, UiSettings};
 use std::path::Path;
-use theme::Palette;
 use views::overlays::{Overlay, OverlayUi};
 
-const GAP: f32 = 2.0;
-const RADIUS: u8 = 10;
+/// Smallest widths (points) that keep every column usable at 1024x700.
+const MIN_SIDEBAR: f32 = 200.0;
+const MIN_EDITOR: f32 = 560.0;
+const MIN_PANE: f32 = 280.0;
+/// Narrowest pane the views are drawn in.
+const MIN_CONTENT: f32 = 100.0;
 
 pub struct NexusApp {
     pub state: NexusState,
@@ -37,9 +42,7 @@ pub struct NexusApp {
     runner: views::runner::RunnerUi,
     /// The collection runner replaces the request/response islands.
     pub runner_open: bool,
-    sidebar_width: f32,
-    /// Fraction of the editor area used by the request pane.
-    split: f32,
+    layout_dirty: Option<std::time::Instant>,
     token_job: Option<(nexus_http_core::model::Id, oauth::TokenJob)>,
 }
 
@@ -69,8 +72,7 @@ impl NexusApp {
             overlays: Default::default(),
             runner: Default::default(),
             runner_open: false,
-            sidebar_width: 270.0,
-            split: 0.5,
+            layout_dirty: None,
             token_job: None,
         }
     }
@@ -235,85 +237,115 @@ impl NexusApp {
                 .collect();
         ui.data_mut(|d| {
             d.insert_temp(
-                egui::Id::new(widgets::SECRET_KEYS_ID),
+                egui::Id::new(state::SECRET_KEYS_ID),
                 std::sync::Arc::new(secrets),
             )
         });
-        let pal = Palette::of(ui);
+        let colors = Theme::colors(ui.ctx());
         let full = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(full, 0.0, pal.frame);
-        let area = full.shrink(GAP);
-
-        // Column geometry
-        self.sidebar_width = self
-            .sidebar_width
-            .clamp(200.0, (area.width() * 0.45).max(200.0));
-        let sidebar = Rect::from_min_max(
-            area.min,
-            pos2(area.left() + self.sidebar_width, area.bottom()),
+        ui.painter().rect_filled(full, 0.0, colors.frame);
+        let area = full.shrink(size::ISLAND_GAP);
+        let mut shell = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(area)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        let editor = Rect::from_min_max(pos2(sidebar.right() + GAP, area.top()), area.max);
-        self.split = self.split.clamp(0.25, 0.75);
-        let req_w = (editor.width() - GAP) * self.split;
-        let request = Rect::from_min_max(editor.min, pos2(editor.left() + req_w, editor.bottom()));
-        let response = Rect::from_min_max(pos2(request.right() + GAP, editor.top()), editor.max);
-
-        // Splitters
-        let handle = |ui: &mut Ui, x: f32, id: &str| -> f32 {
-            let r = Rect::from_min_max(pos2(x - 3.0, area.top()), pos2(x + 3.0, area.bottom()));
-            let resp = ui.interact(r, ui.id().with(id), Sense::drag());
-            if resp.hovered() || resp.dragged() {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-            }
-            resp.drag_delta().x
-        };
-        let dx = handle(ui, sidebar.right() + GAP / 2.0, "split-sidebar");
-        self.sidebar_width += dx;
-        let dx = handle(ui, request.right() + GAP / 2.0, "split-editor");
-        if editor.width() > 0.0 {
-            self.split += dx / editor.width();
-        }
-
-        let island = |ui: &mut Ui, rect: Rect, f: &mut dyn FnMut(&mut Ui)| {
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(RADIUS), pal.surface);
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            child.set_clip_rect(rect.intersect(ui.clip_rect()));
-            f(&mut child);
-        };
 
         let mut side_actions = views::sidebar::SidebarActions::default();
-        island(ui, sidebar, &mut |ui| {
-            views::sidebar::show(ui, &mut self.state, &mut self.sidebar, &mut side_actions)
-        });
-
         let mut req_actions = views::request::RequestActions::default();
         let selected = self.state.selected_request().map(|r| r.id.clone());
-        if self.runner_open {
-            let mut close = false;
-            island(ui, editor, &mut |ui| {
-                views::runner::show(ui, &mut self.state, &mut self.runner, &mut close);
-                toast(ui, &mut self.state, &pal);
-            });
-            if close {
-                self.runner_open = false;
-            }
-        } else {
-            island(ui, request, &mut |ui| match &selected {
-                Some(id) => views::request::show(ui, &mut self.state, id, &mut req_actions),
-                None => welcome(ui, &pal),
-            });
-            island(ui, response, &mut |ui| {
-                if let Some(id) = &selected {
-                    views::response::show(ui, &mut self.state, id, &mut self.response);
-                }
-                toast(ui, &mut self.state, &pal);
-            });
+        let settings = self.state.ui;
+        let (mut sidebar_ratio, mut request_ratio) =
+            (settings.sidebar_ratio, settings.request_ratio);
+        let runner_open = self.runner_open;
+        let mut close_runner = false;
+        let Self {
+            state,
+            sidebar,
+            response,
+            runner,
+            ..
+        } = self;
+        // The panes run one after the other but their closures are built together.
+        let shared = std::cell::RefCell::new(&mut *state);
+
+        SplitPane::horizontal("nexus-sidebar", &mut sidebar_ratio)
+            .default_ratio(UiSettings::DEFAULT_SIDEBAR)
+            .min_sizes(MIN_SIDEBAR, MIN_EDITOR)
+            .label("Resize sidebar")
+            .show(
+                &mut shell,
+                |ui| {
+                    island(ui, |ui| {
+                        views::sidebar::show(
+                            ui,
+                            &mut shared.borrow_mut(),
+                            sidebar,
+                            &mut side_actions,
+                        )
+                    })
+                },
+                |ui| {
+                    if runner_open {
+                        island(ui, |ui| {
+                            views::runner::show(
+                                ui,
+                                &mut shared.borrow_mut(),
+                                runner,
+                                &mut close_runner,
+                            )
+                        });
+                        return;
+                    }
+                    SplitPane::horizontal("nexus-editor", &mut request_ratio)
+                        .default_ratio(UiSettings::DEFAULT_REQUEST)
+                        .min_size(MIN_PANE)
+                        .label("Resize request and response")
+                        .show(
+                            ui,
+                            |ui| {
+                                island(ui, |ui| match &selected {
+                                    Some(id) => views::request::show(
+                                        ui,
+                                        &mut shared.borrow_mut(),
+                                        id,
+                                        &mut req_actions,
+                                    ),
+                                    None => welcome(ui),
+                                })
+                            },
+                            |ui| {
+                                island(ui, |ui| {
+                                    if let Some(id) = &selected {
+                                        views::response::show(
+                                            ui,
+                                            &mut shared.borrow_mut(),
+                                            id,
+                                            response,
+                                        );
+                                    }
+                                })
+                            },
+                        );
+                },
+            );
+        if close_runner {
+            self.runner_open = false;
         }
+        let layout = UiSettings {
+            sidebar_ratio,
+            request_ratio,
+        };
+        if layout != settings {
+            self.state.ui = layout;
+            self.layout_dirty = Some(std::time::Instant::now());
+        }
+        // Save once the divider is let go, not on every frame of a drag.
+        if self.layout_dirty.is_some() && !ui.input(|i| i.pointer.any_down()) {
+            self.layout_dirty = None;
+            self.state.save_ui();
+        }
+        toast(ui.ctx(), &mut self.state);
         if let Some(scope) = side_actions.run.take() {
             self.open_runner(scope);
         }
@@ -359,55 +391,71 @@ impl NexusApp {
     }
 }
 
-fn welcome(ui: &mut Ui, pal: &Palette) {
-    widgets::empty_state(
-        ui,
-        "Select or create a request",
-        "Ctrl+N creates a request, Ctrl+P jumps to one.",
-    );
-    let _ = pal;
+/// An island filling its pane.
+fn island(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    // A pane can be empty (or even negative) in egui's first, sizing frame.
+    let size = ui.max_rect().size().max(egui::Vec2::ZERO);
+    Surface::Island
+        .frame(ui.ctx())
+        .inner_margin(0)
+        .show(ui, |ui| {
+            ui.set_min_size(size);
+            ui.set_max_size(size);
+            // Views assume a usable pane: skip egui's zero-sized sizing frames.
+            if size.x >= MIN_CONTENT {
+                add(ui);
+            }
+        });
 }
 
-fn toast(ui: &mut Ui, state: &mut NexusState, pal: &Palette) {
+fn welcome(ui: &mut Ui) {
+    EmptyState::new("Select or create a request")
+        .icon(Glyph::Send)
+        .hint("Create a request to start testing your API, or jump to one.")
+        .show(ui);
+    ui.add_space(8.0);
+    for (shortcut, what) in [("Ctrl+N", "new request"), ("Ctrl+P", "go to request")] {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+            ui.horizontal(|ui| {
+                // Center the key caps and their caption as one row.
+                ui.add_space((ui.available_width() - 150.0).max(0.0) / 2.0);
+                ui.add(Kbd::parse(shortcut));
+                ui.label(what);
+            });
+        });
+    }
+}
+
+fn toast(ctx: &egui::Context, state: &mut NexusState) {
+    const LIFETIME: f32 = 4.0;
     let Some((message, at)) = &state.notice else {
         return;
     };
     let age = at.elapsed().as_secs_f32();
-    if age > 4.0 {
+    if age > LIFETIME {
         state.notice = None;
         return;
     }
-    let alpha = if age > 3.5 { (4.0 - age) * 2.0 } else { 1.0 };
-    let rect = ui.max_rect();
-    let galley = ui.painter().layout(
-        message.clone(),
-        egui::FontId::proportional(12.5),
-        pal.text,
-        rect.width() - 80.0,
-    );
-    let size = galley.size() + vec2(24.0, 14.0);
-    let r = Rect::from_min_size(
-        pos2(rect.right() - size.x - 14.0, rect.bottom() - size.y - 14.0),
-        size,
-    );
-    ui.painter().rect(
-        r,
-        CornerRadius::same(8),
-        pal.raised.gamma_multiply(alpha),
-        egui::Stroke::new(1.0_f32, pal.border.gamma_multiply(alpha)),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().galley(
-        r.min + vec2(12.0, 7.0),
-        galley,
-        pal.text.gamma_multiply(alpha),
-    );
-    ui.ctx().request_repaint();
+    let severity = if message.contains("failed")
+        || message.starts_with("Cannot")
+        || message.starts_with("Could not")
+    {
+        Severity::Error
+    } else {
+        Severity::Info
+    };
+    let out = Toast::new(severity, message.as_str()).show_corner(ctx, "nexus-notice", 0);
+    if out.dismissed {
+        state.notice = None;
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f32(LIFETIME - age));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Rect, pos2, vec2};
     use nexus_http_core::model::{Body, Method, Request, Workspace};
 
     fn render(app: &mut NexusApp, dark: bool) {
