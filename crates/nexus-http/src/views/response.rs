@@ -3,14 +3,13 @@
 //!
 //! Built only from archipel-kit. The six tabs are views of the same response, so they are a
 //! `SegmentedControl` (kit docs: "switching views"), not editor `TabBar` tabs.
-//! The body text itself still goes through `widgets::code_view` until the kit has a
-//! `CodeView`.
+//! The body text is the kit `CodeView` (read-only, virtualized, with find and folding).
 
 use crate::state::{NexusState, Outcome, ResponseTab};
-use crate::widgets::{Syntax, code_view};
 use archipel_kit::behaviour::WidgetExt;
+use archipel_kit::components::code::{Json, PlainText, Xml};
 use archipel_kit::components::{
-    Banner, Button, Cell, Column, Dropdown, EmptyState, IconButton, ListRow, ProgressBar,
+    Banner, Button, Cell, CodeView, Column, Dropdown, EmptyState, IconButton, ListRow, ProgressBar,
     SectionHeader, SegmentedControl, Severity, Spinner, Table, Tag, TextField, Tooltip, TooltipExt,
     VirtualList,
 };
@@ -229,8 +228,14 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi
         .inner_margin(egui::Margin::symmetric(size::CONTENT_INSET as i8, 0))
         .show(ui, |ui| match state.response_tab {
             ResponseTab::Preview => preview(ui, &response, local),
-            // TODO(kit CodeView): replace with the kit CodeView when it lands.
-            ResponseTab::Raw => code_view(ui, &response.body_text(), Syntax::Plain, "raw"),
+            ResponseTab::Raw => {
+                let text = response.body_text();
+                CodeView::new(&text)
+                    .label("Raw body")
+                    .highlighter(&PlainText)
+                    .id(egui::Id::new("resp-raw"))
+                    .show(ui);
+            }
             ResponseTab::Headers => headers(ui, &response, local),
             ResponseTab::Cookies => cookies_tab(ui, &response, state, local),
             ResponseTab::Timeline => timeline(ui, &response, local),
@@ -351,8 +356,15 @@ fn preview(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
         }
         BodyKind::Json => {
             match nexus_http_core::filter::filter_json_text(&response.body_text(), &local.filter) {
-                // TODO(kit CodeView): replace with the kit CodeView when it lands.
-                Ok(text) => code_view(ui, &text, Syntax::Json, "pretty"),
+                Ok(text) => {
+                    CodeView::new(&text)
+                        .label("Response body")
+                        .highlighter(&Json)
+                        .line_numbers(true)
+                        .folding(true)
+                        .id(egui::Id::new("resp-pretty"))
+                        .show(ui);
+                }
                 Err(e) => {
                     Banner::new(Severity::Warning, e).show(ui);
                 }
@@ -378,8 +390,17 @@ fn preview(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
                 ))
                 .show(ui);
         }
-        // TODO(kit CodeView): replace with the kit CodeView when it lands.
-        _ => code_view(ui, &response.body_text(), Syntax::Plain, "pretty-text"),
+        _ => {
+            let text = response.body_text();
+            let view = CodeView::new(&text)
+                .label("Response body")
+                .line_numbers(true)
+                .id(egui::Id::new("resp-pretty-text"));
+            match kind {
+                BodyKind::Xml | BodyKind::Html => view.highlighter(&Xml).show(ui),
+                _ => view.highlighter(&PlainText).show(ui),
+            };
+        }
     });
     if kind == BodyKind::Json {
         ui.add_space(4.0);
