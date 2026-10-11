@@ -348,58 +348,64 @@ fn preview(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
     let kind = response.body_kind();
     let filter_h = if kind == BodyKind::Json { 64.0 } else { 0.0 };
     let body_h = (ui.available_height() - filter_h).max(40.0);
-    ui.allocate_ui(egui::vec2(ui.available_width(), body_h), |ui| match kind {
-        BodyKind::Empty => {
-            EmptyState::new("Empty body")
-                .hint("The response has no content.")
-                .show(ui);
-        }
-        BodyKind::Json => {
-            match nexus_http_core::filter::filter_json_text(&response.body_text(), &local.filter) {
-                Ok(text) => {
-                    CodeView::new(&text)
-                        .label("Response body")
-                        .highlighter(&Json)
-                        .line_numbers(true)
-                        .folding(true)
-                        .id(egui::Id::new("resp-pretty"))
-                        .show(ui);
-                }
-                Err(e) => {
-                    Banner::new(Severity::Warning, e).show(ui);
+    ui.allocate_ui(egui::vec2(ui.available_width(), body_h), |ui| {
+        ui.set_min_height(body_h);
+        match kind {
+            BodyKind::Empty => {
+                EmptyState::new("Empty body")
+                    .hint("The response has no content.")
+                    .show(ui);
+            }
+            BodyKind::Json => {
+                match nexus_http_core::filter::filter_json_text(
+                    &response.body_text(),
+                    &local.filter,
+                ) {
+                    Ok(text) => {
+                        CodeView::new(&text)
+                            .label("Response body")
+                            .highlighter(&Json)
+                            .line_numbers(true)
+                            .folding(true)
+                            .id(egui::Id::new("resp-pretty"))
+                            .show(ui);
+                    }
+                    Err(e) => {
+                        Banner::new(Severity::Warning, e).show(ui);
+                    }
                 }
             }
-        }
-        BodyKind::Image => {
-            EmptyState::new("Image response")
-                .icon(Glyph::Image)
-                .hint(format!(
-                    "{} · {}",
-                    response.content_type().unwrap_or("image"),
-                    format_size(response.body.len() as u64)
-                ))
-                .show(ui);
-        }
-        BodyKind::Binary => {
-            EmptyState::new("Binary response")
-                .icon(Glyph::File)
-                .hint(format!(
-                    "{} of {}",
-                    format_size(response.body.len() as u64),
-                    response.content_type().unwrap_or("unknown type")
-                ))
-                .show(ui);
-        }
-        _ => {
-            let text = response.body_text();
-            let view = CodeView::new(&text)
-                .label("Response body")
-                .line_numbers(true)
-                .id(egui::Id::new("resp-pretty-text"));
-            match kind {
-                BodyKind::Xml | BodyKind::Html => view.highlighter(&Xml).show(ui),
-                _ => view.highlighter(&PlainText).show(ui),
-            };
+            BodyKind::Image => {
+                EmptyState::new("Image response")
+                    .icon(Glyph::Image)
+                    .hint(format!(
+                        "{} · {}",
+                        response.content_type().unwrap_or("image"),
+                        format_size(response.body.len() as u64)
+                    ))
+                    .show(ui);
+            }
+            BodyKind::Binary => {
+                EmptyState::new("Binary response")
+                    .icon(Glyph::File)
+                    .hint(format!(
+                        "{} of {}",
+                        format_size(response.body.len() as u64),
+                        response.content_type().unwrap_or("unknown type")
+                    ))
+                    .show(ui);
+            }
+            _ => {
+                let text = response.body_text();
+                let view = CodeView::new(&text)
+                    .label("Response body")
+                    .line_numbers(true)
+                    .id(egui::Id::new("resp-pretty-text"));
+                match kind {
+                    BodyKind::Xml | BodyKind::Html => view.highlighter(&Xml).show(ui),
+                    _ => view.highlighter(&PlainText).show(ui),
+                };
+            }
         }
     });
     if kind == BodyKind::Json {
