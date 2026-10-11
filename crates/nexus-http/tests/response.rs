@@ -2,7 +2,7 @@
 
 use archipel_kit::behaviour::WidgetExt;
 use archipel_kit::components::{Button, Dropdown, IconButton, TextField, Tooltip};
-use archipel_kit::testing::{self, NodeExt, NodeT, Queryable, Role};
+use archipel_kit::testing::{self, NodeT, Queryable, Role};
 use archipel_kit::{Glyph, Theme, egui};
 use nexus_http::state::{NexusState, Outcome, ResponseTab};
 use nexus_http::views::response::{self, ResponseUi};
