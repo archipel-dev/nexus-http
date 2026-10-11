@@ -19,6 +19,7 @@ url.workspace = true
 archipel-sdk = { workspace = true, features = ["testing"] }
 archipel-kit = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tiny_http.workspace = true
 
 [lints]
 workspace = true
