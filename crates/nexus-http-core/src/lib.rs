@@ -11,7 +11,9 @@
 pub mod assertions;
 pub mod auth;
 pub mod codegen;
+pub mod completion;
 pub mod cookies;
+pub mod editing;
 pub mod exec;
 pub mod filter;
 pub mod graphql;

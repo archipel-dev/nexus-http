@@ -228,6 +228,44 @@ impl Schema {
         Some(current)
     }
 
+    /// The text completing `field` and where the caret goes in it (chars): fields with
+    /// required arguments get `(arg: )` with the caret at the first value, object fields a
+    /// selection set `{  }`.
+    pub fn insertion(&self, field: &Field) -> (String, usize) {
+        let required: Vec<&str> = field
+            .args
+            .iter()
+            .filter(|a| a.type_ref.ends_with('!'))
+            .map(|a| a.name.as_str())
+            .collect();
+        let mut out = field.name.clone();
+        let mut caret = None;
+        if !required.is_empty() {
+            out.push('(');
+            caret = Some(out.chars().count() + required[0].len() + 2);
+            out.push_str(
+                &required
+                    .iter()
+                    .map(|a| format!("{a}: "))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            out.push(')');
+        }
+        let is_object = self
+            .types
+            .get(&field.named)
+            .is_some_and(|t| !t.fields.is_empty() && t.kind != "INPUT_OBJECT");
+        if is_object {
+            out.push_str(" {  }");
+            if caret.is_none() {
+                caret = Some(out.chars().count() - 2);
+            }
+        }
+        let caret = caret.unwrap_or(out.chars().count());
+        (out, caret)
+    }
+
     /// Fields of the selection set at `cursor` that start with the identifier
     /// being typed (case-insensitive), with that partial identifier's byte start.
     pub fn complete(&self, query: &str, cursor: usize) -> Option<(usize, Vec<&Field>)> {
@@ -524,6 +562,47 @@ mod tests {
         assert_eq!(
             schema.type_at(inline, inline.len()).as_deref(),
             Some("User")
+        );
+    }
+}
+
+#[cfg(test)]
+mod insertion_tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn insertion_adds_arguments_and_selection_sets() {
+        let t = |kind: &str, name: &str| serde_json::json!({"kind": kind, "name": name, "ofType": null});
+        let nn =
+            |inner: Value| serde_json::json!({"kind": "NON_NULL", "name": null, "ofType": inner});
+        let doc = serde_json::json!({"data": {"__schema": {"queryType": {"name": "Query"}, "types": [
+            {"kind": "OBJECT", "name": "Query", "fields": [
+                {"name": "product", "args": [{"name": "sku", "type": nn(t("SCALAR", "String"))}], "type": t("OBJECT", "Product")},
+                {"name": "me", "args": [], "type": t("OBJECT", "Product")}
+            ]},
+            {"kind": "OBJECT", "name": "Product", "fields": [{"name": "sku", "args": [], "type": t("SCALAR", "String")}]}
+        ]}}});
+        let schema = Schema::from_introspection(&doc).expect("schema");
+        let field = |ty: &str, name: &str| {
+            schema.types[ty]
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .expect("field")
+                .clone()
+        };
+        assert_eq!(
+            schema.insertion(&field("Query", "product")),
+            ("product(sku: ) {  }".into(), 13)
+        );
+        assert_eq!(
+            schema.insertion(&field("Product", "sku")),
+            ("sku".into(), 3)
+        );
+        assert_eq!(
+            schema.insertion(&field("Query", "me")),
+            ("me {  }".into(), 5)
         );
     }
 }
