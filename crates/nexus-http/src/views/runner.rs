@@ -233,10 +233,6 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, local: &mut RunnerUi, close: &m
             } else if let Some(summary) = &local.summary {
                 ui.horizontal(|ui| {
                     ui.add(Tag::new(format!("{} passed", summary.passed())).tone(Tone::Success));
-                    let streamed = summary.steps.iter().filter(|s| s.streamed.is_some()).count();
-                    if streamed > 0 {
-                        ui.add(Tag::new(format!("{streamed} streamed")).tone(Tone::Accent));
-                    }
                     if summary.failed() > 0 {
                         ui.add(
                             Tag::new(format!("{} failed", summary.failed())).tone(Tone::Error),
@@ -399,11 +395,7 @@ fn plan_table(ui: &mut Ui, state: &NexusState, local: &mut RunnerUi, planned: &[
             let (folders, request) = &rows[row];
             match col {
                 0 => {
-                    let method = match request.protocol {
-                        nexus_http_core::model::Protocol::Sse => "SSE".to_owned(),
-                        nexus_http_core::model::Protocol::WebSocket => "WS".to_owned(),
-                        _ => request.method.to_string(),
-                    };
+                    let method = request.method.to_string();
                     Cell::new(method.clone()).tone(Tone::method(&method))
                 }
                 1 => Cell::new(request.name.as_str()),
@@ -432,7 +424,7 @@ fn results(ui: &mut Ui, local: &mut RunnerUi) {
     let (columns, selected) = local.results_table.columns(
         ui,
         &[
-            ("Result", 100.0, false),
+            ("Result", 80.0, false),
             ("Method", 80.0, true),
             ("Request", 240.0, false),
             ("Iteration", 80.0, false),
@@ -447,9 +439,6 @@ fn results(ui: &mut Ui, local: &mut RunnerUi) {
         .show(ui, |row, col| {
             let step = &steps[row];
             match col {
-                0 if step.passed() && step.streamed.is_some() => {
-                    Cell::new("Streamed").icon(Glyph::Check).tone(Tone::Accent)
-                }
                 0 if step.passed() => Cell::new("Pass").icon(Glyph::Check).tone(Tone::Success),
                 0 => Cell::new("Fail").icon(Glyph::Close).tone(Tone::Error),
                 1 => Cell::new(step.method.as_str()).tone(Tone::method(&step.method)),
@@ -493,10 +482,6 @@ fn results(ui: &mut Ui, local: &mut RunnerUi) {
         let got = (!a.passed).then(|| format!("got {}", a.actual));
         lines.push((glyph, tone, a.description.clone(), got));
     }
-    if let Some(n) = step.streamed {
-        let text = format!("Received {n} message{} (bounded receive)", plural_s(n));
-        lines.insert(0, (Glyph::Check, Tone::Accent, text, None));
-    }
     if lines.is_empty() {
         ui.label("No assertions on this request.");
         return;
@@ -513,8 +498,4 @@ fn results(ui: &mut Ui, local: &mut RunnerUi) {
                 None => row,
             }
         });
-}
-
-fn plural_s(n: u32) -> &'static str {
-    if n == 1 { "" } else { "s" }
 }
