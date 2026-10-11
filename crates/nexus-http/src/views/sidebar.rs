@@ -175,7 +175,10 @@ pub fn show(
                 .placeholder("Filter requests")
                 .width(width),
         );
-        if filter.has_focus() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        // The text edit gives up the focus on Escape, so look at the key it just saw.
+        if (filter.has_focus() || filter.lost_focus())
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
             state.filter.clear();
         }
         let plus = ui.add(IconButton::new(Glyph::Plus, "New request or folder"));
