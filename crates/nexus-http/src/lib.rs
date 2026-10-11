@@ -10,12 +10,12 @@ pub mod graphql_ui;
 pub mod oauth;
 pub mod plugin;
 pub mod state;
-pub mod theme;
 pub mod views;
-pub mod widgets;
 
 pub use plugin::NexusHttpPlugin;
 
+use archipel_kit::Theme;
+use archipel_kit::components::EmptyState;
 use egui::{
     CornerRadius, CursorIcon, Key, KeyboardShortcut, Modifiers, Rect, Sense, Ui, pos2, vec2,
 };
@@ -23,7 +23,6 @@ use nexus_http_core::model::{Auth, Item};
 use nexus_http_core::template::Context;
 use state::NexusState;
 use std::path::Path;
-use theme::Palette;
 use views::overlays::{Overlay, OverlayUi};
 
 const GAP: f32 = 2.0;
@@ -235,11 +234,11 @@ impl NexusApp {
                 .collect();
         ui.data_mut(|d| {
             d.insert_temp(
-                egui::Id::new(widgets::SECRET_KEYS_ID),
+                egui::Id::new(state::SECRET_KEYS_ID),
                 std::sync::Arc::new(secrets),
             )
         });
-        let pal = Palette::of(ui);
+        let pal = Theme::colors(ui.ctx());
         let full = ui.available_rect_before_wrap();
         ui.painter().rect_filled(full, 0.0, pal.frame);
         let area = full.shrink(GAP);
@@ -276,7 +275,7 @@ impl NexusApp {
 
         let island = |ui: &mut Ui, rect: Rect, f: &mut dyn FnMut(&mut Ui)| {
             ui.painter()
-                .rect_filled(rect, CornerRadius::same(RADIUS), pal.surface);
+                .rect_filled(rect, CornerRadius::same(RADIUS), pal.island);
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(rect)
@@ -305,7 +304,7 @@ impl NexusApp {
         } else {
             island(ui, request, &mut |ui| match &selected {
                 Some(id) => views::request::show(ui, &mut self.state, id, &mut req_actions),
-                None => welcome(ui, &pal),
+                None => welcome(ui),
             });
             island(ui, response, &mut |ui| {
                 if let Some(id) = &selected {
@@ -359,16 +358,13 @@ impl NexusApp {
     }
 }
 
-fn welcome(ui: &mut Ui, pal: &Palette) {
-    widgets::empty_state(
-        ui,
-        "Select or create a request",
-        "Ctrl+N creates a request, Ctrl+P jumps to one.",
-    );
-    let _ = pal;
+fn welcome(ui: &mut Ui) {
+    EmptyState::new("Select or create a request")
+        .hint("Ctrl+N creates a request, Ctrl+P jumps to one.")
+        .show(ui);
 }
 
-fn toast(ui: &mut Ui, state: &mut NexusState, pal: &Palette) {
+fn toast(ui: &mut Ui, state: &mut NexusState, pal: &archipel_kit::theme::Colors) {
     let Some((message, at)) = &state.notice else {
         return;
     };
@@ -393,7 +389,7 @@ fn toast(ui: &mut Ui, state: &mut NexusState, pal: &Palette) {
     ui.painter().rect(
         r,
         CornerRadius::same(8),
-        pal.raised.gamma_multiply(alpha),
+        pal.popup.gamma_multiply(alpha),
         egui::Stroke::new(1.0_f32, pal.border.gamma_multiply(alpha)),
         egui::StrokeKind::Inside,
     );

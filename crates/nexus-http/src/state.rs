@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 /// Save at most this often while the user types.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(600);
 
+/// egui temp-data key holding the workspace's secret variable names (an
+/// `Arc<HashSet<String>>`), so highlighting and completion never reveal their values.
+pub const SECRET_KEYS_ID: &str = "nexus-secret-keys";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestTab {
     #[default]
