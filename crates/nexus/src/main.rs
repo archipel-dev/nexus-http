@@ -10,6 +10,11 @@
 //! `NEXUS_REQUEST_TAB=<tab>`, `NEXUS_RESPONSE_TAB=<tab>`,
 //! `NEXUS_OVERLAY=env|switcher|import|export|code`, `NEXUS_RUN=<top-level folder or empty>`
 //! opens the collection runner and starts a run.
+//!
+//! `NEXUS_PERF=<out.json>` measures start, frame time, idle CPU and memory and exits
+//! (see `perf.rs` and `docs/performance.md`; use `cargo xtask perf`).
+
+mod perf;
 
 use eframe::egui;
 use nexus_http::NexusApp;
@@ -29,6 +34,7 @@ fn main() -> eframe::Result {
         let sse_port = demo_sse_server();
         let dir = std::env::temp_dir().join(format!("nexus-demo-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("invoice.pdf"), b"%PDF-1.4\n% demo invoice\n");
         let mut state = NexusState::open(&dir);
         state.replace_workspace(demo_workspace(port, ws_port, sse_port));
         NexusApp::with_state(state)
@@ -57,6 +63,7 @@ fn main() -> eframe::Result {
                 sent: false,
                 messages: 0,
                 last_message: 0.0,
+                perf: perf::Perf::from_env(),
             }))
         }),
     )
@@ -68,10 +75,14 @@ struct Host {
     /// Demo: WebSocket messages still to send once connected.
     messages: u32,
     last_message: f64,
+    perf: Option<perf::Perf>,
 }
 
 impl eframe::App for Host {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(perf) = &mut self.perf {
+            perf.update(ctx, &mut self.app);
+        }
         if !self.sent {
             self.sent = true;
             if std::env::var_os("NEXUS_SEND").is_some() {
@@ -367,6 +378,7 @@ fn demo_server() -> u16 {
                     json!({"sku": "KB-001", "name": "Mechanical Keyboard", "price": 129.0}),
                 ),
                 ("POST", "/v1/products") => (201, serde_json::from_str(&body).unwrap_or(json!({}))),
+                ("POST", p) if p.ends_with("/invoice") => (201, json!({"received": true})),
                 ("PATCH", _) => (200, json!({"sku": "KB-042", "price": 169.0})),
                 ("DELETE", _) => (204, json!(null)),
                 ("POST", "/graphql") if body.contains("__schema") => (200, demo_schema()),

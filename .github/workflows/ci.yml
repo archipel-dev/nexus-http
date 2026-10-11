@@ -79,3 +79,28 @@ jobs:
           else
             echo "crates/nexus does not exist yet; nothing to build"
           fi
+
+  perf:
+    name: perf budgets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev libvulkan-dev pkg-config \
+            xvfb mesa-vulkan-drivers
+      # Builds nexus in release mode, measures it under Xvfb (lavapipe software
+      # rendering), appends the table to the job summary and fails over budget.
+      - name: Check budgets
+        run: cargo xtask perf
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf
+          path: target/perf/
