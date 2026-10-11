@@ -1,0 +1,67 @@
+name: Release PR
+
+# On every push to main release-please opens or updates a release PR that bumps
+# [workspace.package] version in Cargo.toml and writes CHANGELOG.md. Merging it
+# tags `v<version>` and creates the GitHub release; release.yml then attaches the
+# binaries. See docs/releasing.md.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    env:
+      # Pushes, tags and PRs made with GITHUB_TOKEN do not trigger other
+      # workflows. Set the RELEASE_PLEASE_TOKEN secret (a PAT or GitHub App
+      # token with contents and pull-requests write) so CI runs on the release
+      # PR and release.yml fires from the tag push.
+      HAS_PAT: ${{ secrets.RELEASE_PLEASE_TOKEN != '' }}
+      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # A tag created with GITHUB_TOKEN does not trigger release.yml, so start
+      # it explicitly. With a PAT the tag push triggers it by itself.
+      - name: Build and attach release binaries
+        if: steps.release.outputs.release_created == 'true' && env.HAS_PAT != 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f "tag=$TAG"
+
+      # release-please does not know Cargo.lock; refresh the workspace members'
+      # versions on the release PR branch.
+      - name: Check out the release PR branch
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.release.outputs.prs_created == 'true'
+      - name: Refresh Cargo.lock
+        if: steps.release.outputs.prs_created == 'true'
+        shell: bash
+        run: |
+          cargo update --workspace
+          if ! git diff --quiet -- Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: update Cargo.lock for release"
+            git push
+          fi

@@ -1,0 +1,125 @@
+name: Release
+
+# Builds `nexus` archives and installers per platform with `cargo xtask dist`
+# and attaches them, plus SHA256SUMS, to the GitHub release of the tag. Creates
+# the release when release-please did not. Binaries are unsigned.
+#
+# Triggers: a pushed `v*` tag, or manually with a tag (release-please.yml starts
+# it this way because tags created with GITHUB_TOKEN do not trigger workflows).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish, e.g. v0.1.0
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: package ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu keeps the .deb's glibc requirement low.
+          - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { name: macos-aarch64, os: macos-latest, target: aarch64-apple-darwin }
+          - { name: macos-x86_64, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: System packages and AppImage tooling
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -q --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libgl1-mesa-dev libvulkan-dev pkg-config desktop-file-utils
+          curl -sSLf -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+          echo "46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1  $RUNNER_TEMP/appimagetool" | sha256sum -c
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
+
+      - name: Install WiX Toolset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+
+      - name: Build archive and installer
+        shell: bash
+        run: cargo xtask dist --target "${{ matrix.target }}" --version "${TAG#v}" | tee "$RUNNER_TEMP/artifacts.txt"
+
+      - name: Verify checksums
+        shell: bash
+        run: |
+          cd dist
+          for sum in *.sha256; do
+            if command -v sha256sum > /dev/null; then sha256sum -c "$sum"; else shasum -a 256 -c "$sum"; fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexus-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.msi
+            dist/*.dmg
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Combine checksums
+        shell: bash
+        run: |
+          cd artifacts
+          cat ./*.sha256 | sort -k 2 > SHA256SUMS
+          rm ./*.sha256
+          sha256sum -c SHA256SUMS
+          ls -la
+      - name: Create the release if missing and upload assets
+        shell: bash
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" artifacts/* --clobber
