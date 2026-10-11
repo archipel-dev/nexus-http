@@ -69,9 +69,10 @@ fn fixture() -> Fixture {
             actual: "2".into(),
         },
     ];
-    state
-        .outcomes
-        .insert(id.clone(), Outcome::Response(Box::new(response(200, BODY, 0)), checks));
+    state.outcomes.insert(
+        id.clone(),
+        Outcome::Response(Box::new(response(200, BODY, 0)), checks),
+    );
     Fixture {
         state,
         ui: ResponseUi::default(),

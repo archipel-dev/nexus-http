@@ -1,17 +1,20 @@
-//! Modal overlays: environment editor, request switcher (Ctrl+P), import,
-//! export and code generation.
+//! Modal overlays on archipel-kit dialogs: environment editor, request switcher (Ctrl+P),
+//! import, export and code generation.
 
 use crate::state::NexusState;
-use crate::theme::{Palette, mono, semibold};
-use crate::widgets::{
-    self, Icon, Syntax, caption, code_editor, code_view, field_frame, icon_button, primary_button,
-    secondary_button,
+use crate::widgets::{Syntax, code_editor, code_view};
+use archipel_kit::components::{
+    Banner, Button, Checkbox, Dialog, DialogAction, Dropdown, EmptyState, Kbd, ListRow, Severity,
+    Tag, TextField, VirtualList,
 };
-use egui::{Align, CornerRadius, Layout, RichText, Sense, Ui, vec2};
+use archipel_kit::parts::{Slot, Surface};
+use archipel_kit::tokens::typography;
+use archipel_kit::{Glyph, Theme, Tone, egui};
+use egui::{Key, Modifiers, Ui, vec2};
 use nexus_http_core::codegen::{self, Target};
 use nexus_http_core::exec::{PrepareOptions, prepare};
 use nexus_http_core::import::{self, ImportError};
-use nexus_http_core::model::{Environment, Id};
+use nexus_http_core::model::{Environment, Id, Protocol};
 use serde_json::{Map, Value};
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -25,6 +28,16 @@ pub enum Overlay {
     Code,
 }
 
+/// Environment colors: (name shown in the dropdown, hex stored in the workspace).
+const ENV_COLORS: [(&str, &str); 6] = [
+    ("Green", "#4E9D6C"),
+    ("Blue", "#3871E1"),
+    ("Amber", "#D59637"),
+    ("Red", "#C54E58"),
+    ("Purple", "#9E6AD8"),
+    ("Teal", "#2AACB8"),
+];
+
 #[derive(Default)]
 pub struct OverlayUi {
     pub open: Overlay,
@@ -35,13 +48,14 @@ pub struct OverlayUi {
     env_error: Option<String>,
     // switcher
     query: String,
-    cursor: usize,
+    cursor: Option<usize>,
     // import / export
     import_text: String,
     import_path: String,
     import_merge: bool,
     import_result: Option<Result<String, String>>,
     export_path: String,
+    export_error: Option<String>,
     // codegen
     target: Option<Target>,
     focus_pending: bool,
@@ -54,395 +68,164 @@ impl OverlayUi {
         match overlay {
             Overlay::Switcher => {
                 self.query.clear();
-                self.cursor = 0;
+                self.cursor = Some(0);
             }
             Overlay::Environments => self.env_loaded_for = None,
             Overlay::Import => self.import_result = None,
+            Overlay::Export => self.export_error = None,
             _ => {}
         }
     }
 }
 
-fn modal_frame(pal: &Palette) -> egui::Frame {
-    egui::Frame::new()
-        .fill(pal.raised)
-        .stroke(pal.hairline())
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(16))
-        .shadow(egui::Shadow {
-            offset: [0, 8],
-            blur: 28,
-            spread: 0,
-            color: egui::Color32::from_black_alpha(if pal.dark { 120 } else { 40 }),
-        })
-}
-
 /// Renders the open overlay, if any.
 pub fn show(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi) {
-    let pal = Palette::of(ui);
     let ctx = ui.ctx().clone();
-    let id = egui::Id::new("nexus-overlay");
-    let close = match local.open {
+    let closed = match local.open {
         Overlay::None => return,
-        Overlay::Switcher => {
-            let area = egui::Area::new(id.with("switcher-area"))
-                .anchor(egui::Align2::CENTER_TOP, vec2(0.0, 80.0));
-            egui::Modal::new(id.with("switcher"))
-                .area(area)
-                .frame(modal_frame(&pal).inner_margin(egui::Margin::same(8)))
-                .show(&ctx, |ui| switcher(ui, state, local, &pal))
-                .should_close()
-        }
-        Overlay::Environments => egui::Modal::new(id.with("env"))
-            .frame(modal_frame(&pal))
-            .show(&ctx, |ui| environments(ui, state, local, &pal))
-            .should_close(),
-        Overlay::Import => egui::Modal::new(id.with("import"))
-            .frame(modal_frame(&pal))
-            .show(&ctx, |ui| import_dialog(ui, state, local, &pal))
-            .should_close(),
-        Overlay::Export => egui::Modal::new(id.with("export"))
-            .frame(modal_frame(&pal))
-            .show(&ctx, |ui| export_dialog(ui, state, local, &pal))
-            .should_close(),
-        Overlay::Code => egui::Modal::new(id.with("code"))
-            .frame(modal_frame(&pal))
-            .show(&ctx, |ui| code_dialog(ui, state, local, &pal))
-            .should_close(),
+        Overlay::Switcher => switcher(&ctx, state, local),
+        Overlay::Environments => environments(&ctx, state, local),
+        Overlay::Import => import_dialog(&ctx, state, local),
+        Overlay::Export => export_dialog(&ctx, state, local),
+        Overlay::Code => code_dialog(&ctx, state, local),
     };
-    if close {
+    if closed {
         local.open = Overlay::None;
     }
 }
 
-fn title_row(ui: &mut Ui, pal: &Palette, title: &str, local: &mut OverlayUi) {
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(title)
-                .font(semibold(ui, 15.0))
-                .color(pal.strong),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, Icon::Close, pal.weak, "Close (Esc)").clicked() {
-                local.open = Overlay::None;
-            }
+/// The method (or protocol) tag shown before a request's name.
+fn method_tag(request: &nexus_http_core::model::Request) -> (String, Tone) {
+    match request.protocol {
+        Protocol::Http => {
+            let method = request.method.to_string();
+            let tone = Tone::method(&method);
+            (method, tone)
+        }
+        Protocol::WebSocket => ("WS".into(), Tone::Accent),
+        Protocol::Sse => ("SSE".into(), Tone::Link),
+        Protocol::Grpc => ("gRPC".into(), Tone::Success),
+    }
+}
+
+/// Keeps <kbd>Enter</kbd> typed into a multi-line editor from also confirming the dialog:
+/// the kit dialog confirms on every Enter. Ctrl+Enter still confirms.
+// TODO(kit Dialog): confirm only when no multi-line field has focus.
+fn keep_enter_in_editor(ui: &Ui, editor: egui::Id) {
+    if ui.memory(|m| m.has_focus(editor)) {
+        ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    }
+}
+
+/// A boxed area for the legacy code widgets.
+fn code_box(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
+    Surface::Field
+        .frame(ui.ctx())
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_height(height);
+            ui.set_width(ui.available_width());
+            add(ui);
         });
-    });
-    ui.add_space(10.0);
 }
 
 // ------------------------------------------------------------------ switcher
 
-fn switcher(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal: &Palette) {
-    ui.set_width(560.0);
+fn switcher(ctx: &egui::Context, state: &mut NexusState, local: &mut OverlayUi) -> bool {
     let matches = state.switcher_matches(&local.query);
-    field_frame(pal).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::hover());
-            widgets::paint_icon(ui.painter(), r, Icon::Search, pal.weak);
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut local.query)
-                    .frame(false)
-                    .hint_text("Go to request…")
-                    .desired_width(ui.available_width()),
+    if matches.is_empty() {
+        local.cursor = None;
+    } else if local.cursor.is_none_or(|c| c >= matches.len()) {
+        local.cursor = Some(0);
+    }
+    let focus = std::mem::take(&mut local.focus_pending);
+    let mut chosen: Option<Id> = None;
+    let cursor = &mut local.cursor;
+    let query = &mut local.query;
+    let action = Dialog::new("Go to request")
+        .width(560.0)
+        .content(|ui| {
+            let field = ui.add(
+                TextField::search(query)
+                    .label("Request")
+                    .placeholder("Go to request…"),
             );
-            if local.focus_pending {
-                edit.request_focus();
-                local.focus_pending = false;
+            if focus {
+                field.request_focus();
             }
-            if edit.changed() {
-                local.cursor = 0;
+            if field.changed() {
+                *cursor = Some(0);
             }
-        });
-    });
-    let (down, up, enter) = ui.input_mut(|i| {
-        (
-            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
-            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
-            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
-        )
-    });
-    if down && local.cursor + 1 < matches.len() {
-        local.cursor += 1;
-    }
-    if up {
-        local.cursor = local.cursor.saturating_sub(1);
-    }
-    ui.add_space(6.0);
-    let mut chosen = None;
-    egui::ScrollArea::vertical()
-        .max_height(360.0)
-        .show(ui, |ui| {
+            let (down, up) = ui.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                    i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                )
+            });
+            if down && let Some(c) = cursor.as_mut() {
+                *c = (*c + 1).min(matches.len().saturating_sub(1));
+            }
+            if up && let Some(c) = cursor.as_mut() {
+                *c = c.saturating_sub(1);
+            }
             if matches.is_empty() {
-                ui.label(RichText::new("No matching requests").color(pal.weak));
+                EmptyState::new("No matching requests")
+                    .icon(Glyph::Search)
+                    .show(ui);
+                return;
             }
-            for (i, (path, id)) in matches.iter().enumerate() {
-                let Some((_, request)) = state.workspace.find_request(id) else {
-                    continue;
-                };
-                let (rect, resp) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-                let active = i == local.cursor;
-                if active || resp.hovered() {
-                    ui.painter().rect_filled(
-                        rect,
-                        CornerRadius::same(6),
-                        if active { pal.selection } else { pal.hover },
-                    );
-                }
-                if active {
-                    resp.scroll_to_me(None);
-                }
-                let mut child = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(rect.shrink2(vec2(8.0, 0.0)))
-                        .layout(Layout::left_to_right(Align::Center)),
-                );
-                widgets::request_label(&mut child, request, 40.0);
-                child.add_space(8.0);
-                child.label(RichText::new(&request.name).color(pal.strong));
-                if !path.is_empty() {
-                    child.label(RichText::new(path).size(12.0).color(pal.weak));
-                }
-                child.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&request.url)
-                                .font(mono(11.5))
-                                .color(pal.faint),
-                        )
-                        .truncate(),
-                    );
+            let height = (matches.len() as f32 * 24.0).clamp(48.0, 336.0);
+            let out = VirtualList::new("nexus-switcher", matches.len(), cursor)
+                .name("Requests")
+                .height(height)
+                .show(ui, |i| {
+                    let (path, id) = &matches[i];
+                    let mut row = ListRow::new("").flat(true);
+                    if let Some((_, request)) = state.workspace.find_request(id) {
+                        let (method, tone) = method_tag(request);
+                        row = ListRow::new(request.name.as_str())
+                            .flat(true)
+                            .secondary(path.as_str())
+                            .trailing(Slot::ui_width(44.0, move |ui| {
+                                ui.add(Tag::new(method).tone(tone));
+                            }));
+                    }
+                    row
                 });
-                if resp.clicked() {
-                    chosen = Some(id.clone());
-                }
+            if let Some(i) = out.activated {
+                chosen = matches.get(i).map(|(_, id)| id.clone());
             }
-        });
-    if enter {
-        chosen = matches.get(local.cursor).map(|(_, id)| id.clone());
+            ui.horizontal(|ui| {
+                for (keys, what) in [("↑↓", "move"), ("Enter", "open"), ("Esc", "close")] {
+                    ui.add(Kbd::new([keys]));
+                    ui.label(what);
+                }
+            });
+        })
+        .primary("Open")
+        .primary_enabled(!matches.is_empty())
+        .secondary("Cancel")
+        .show(ctx);
+    match action {
+        Some(DialogAction::Primary) => {
+            chosen = chosen.or_else(|| {
+                local
+                    .cursor
+                    .and_then(|c| matches.get(c))
+                    .map(|(_, id)| id.clone())
+            });
+        }
+        Some(_) => return true,
+        None => {}
     }
     if let Some(id) = chosen {
         state.select(id);
-        local.open = Overlay::None;
+        return true;
     }
+    false
 }
 
 // ------------------------------------------------------------------ environments
-
-fn environments(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal: &Palette) {
-    ui.set_width(760.0);
-    ui.set_height(480.0);
-    title_row(ui, pal, "Manage Environments", local);
-    let key = local.env_selected.clone();
-    if local.env_loaded_for.as_ref() != Some(&key) {
-        let env = env_ref(state, key.as_ref());
-        local.env_text = serde_json::to_string_pretty(&Value::Object(
-            env.map(|e| e.data.clone()).unwrap_or_default(),
-        ))
-        .unwrap_or_default();
-        local.env_error = None;
-        local.env_loaded_for = Some(key.clone());
-    }
-    ui.horizontal_top(|ui| {
-        // Left list
-        ui.allocate_ui_with_layout(
-            vec2(200.0, ui.available_height()),
-            Layout::top_down(Align::Min),
-            |ui| {
-                let mut pick: Option<Option<Id>> = None;
-                if env_row(
-                    ui,
-                    pal,
-                    "Base Environment",
-                    None,
-                    key.is_none(),
-                    state.workspace.active_environment.is_none(),
-                )
-                .clicked()
-                {
-                    pick = Some(None);
-                }
-                ui.add_space(6.0);
-                caption(ui, "SUB ENVIRONMENTS");
-                ui.add_space(2.0);
-                for env in &state.workspace.environments {
-                    let color = env.color.as_deref().and_then(widgets::parse_color);
-                    let active = state.workspace.active_environment.as_ref() == Some(&env.id);
-                    if env_row(
-                        ui,
-                        pal,
-                        &env.name,
-                        color,
-                        key.as_ref() == Some(&env.id),
-                        active,
-                    )
-                    .clicked()
-                    {
-                        pick = Some(Some(env.id.clone()));
-                    }
-                }
-                ui.add_space(6.0);
-                if ui.button("+ New environment").clicked() {
-                    let env = Environment::new(format!(
-                        "Environment {}",
-                        state.workspace.environments.len() + 1
-                    ));
-                    let id = env.id.clone();
-                    state.workspace.environments.push(env);
-                    state.touch();
-                    pick = Some(Some(id));
-                }
-                if let Some(p) = pick {
-                    local.env_selected = p;
-                }
-            },
-        );
-        ui.separator();
-        // Right editor
-        ui.vertical(|ui| {
-            let selected = local.env_selected.clone();
-            let mut delete = false;
-            if let Some(env_id) = &selected {
-                let Some(env) = state
-                    .workspace
-                    .environments
-                    .iter_mut()
-                    .find(|e| &e.id == env_id)
-                else {
-                    local.env_selected = None;
-                    return;
-                };
-                let mut changed = false;
-                ui.horizontal(|ui| {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut env.name)
-                                .font(semibold(ui, 14.0))
-                                .desired_width(220.0),
-                        )
-                        .changed();
-                    for c in [
-                        "#4E9D6C", "#3871E1", "#D59637", "#C54E58", "#9E6AD8", "#2AACB8",
-                    ] {
-                        let color = widgets::parse_color(c).unwrap_or(pal.accent);
-                        let (r, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-                        ui.painter().circle_filled(r.center(), 6.5, color);
-                        if env.color.as_deref() == Some(c) {
-                            ui.painter().circle_stroke(
-                                r.center(),
-                                8.5,
-                                egui::Stroke::new(1.5_f32, pal.strong),
-                            );
-                        }
-                        if resp.clicked() {
-                            env.color = Some(c.to_owned());
-                            changed = true;
-                        }
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .button(RichText::new("Delete").color(pal.error))
-                            .clicked()
-                        {
-                            delete = true;
-                        }
-                    });
-                });
-                if changed {
-                    state.touch();
-                }
-            } else {
-                ui.label(
-                    RichText::new("Base Environment")
-                        .font(semibold(ui, 14.0))
-                        .color(pal.strong),
-                );
-                ui.label(
-                    RichText::new("Variables here apply to every sub environment.")
-                        .size(12.0)
-                        .color(pal.weak),
-                );
-            }
-            ui.add_space(8.0);
-            let vars = Map::new();
-            let h = ui.available_height() - 64.0;
-            let edited = field_frame(pal)
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.set_height(h);
-                    code_editor(
-                        ui,
-                        &mut local.env_text,
-                        Syntax::Json,
-                        &vars,
-                        ui.id().with("envjson"),
-                    )
-                    .changed()
-                })
-                .inner;
-            if edited {
-                match serde_json::from_str::<Value>(&local.env_text) {
-                    Ok(Value::Object(map)) => {
-                        local.env_error = None;
-                        if let Some(env) = env_mut(state, selected.as_ref()) {
-                            env.data = map;
-                        }
-                        state.touch();
-                    }
-                    Ok(_) => local.env_error = Some("The environment must be a JSON object".into()),
-                    Err(e) => local.env_error = Some(e.to_string()),
-                }
-            }
-            ui.add_space(4.0);
-            match &local.env_error {
-                Some(e) => {
-                    ui.label(
-                        RichText::new(format!("Invalid JSON: {e}"))
-                            .size(12.0)
-                            .color(pal.warning),
-                    );
-                }
-                None => {
-                    ui.label(
-                        RichText::new("Use values as {{ name }} or {{ nested.key }} in any field.")
-                            .size(12.0)
-                            .color(pal.weak),
-                    );
-                }
-            }
-            if let Some(env) = env_mut(state, selected.as_ref()) {
-                let mut secrets = env.secrets.join(", ");
-                let resp = ui
-                    .horizontal(|ui| {
-                        ui.label(RichText::new("Secret keys").size(12.0).color(pal.weak));
-                        ui.add(
-                            egui::TextEdit::singleline(&mut secrets)
-                                .hint_text("token, password — kept out of git")
-                                .desired_width(ui.available_width()),
-                        )
-                    })
-                    .inner;
-                if resp.changed() {
-                    env.secrets = secrets
-                        .split(',')
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    state.touch();
-                }
-            }
-            if delete && let Some(env_id) = &selected {
-                state.workspace.environments.retain(|e| &e.id != env_id);
-                if state.workspace.active_environment.as_ref() == Some(env_id) {
-                    state.workspace.active_environment = None;
-                }
-                local.env_selected = None;
-                state.touch();
-            }
-        });
-    });
-}
 
 fn env_ref<'a>(state: &'a NexusState, id: Option<&Id>) -> Option<&'a Environment> {
     match id {
@@ -462,112 +245,278 @@ fn env_mut<'a>(state: &'a mut NexusState, id: Option<&Id>) -> Option<&'a mut Env
     }
 }
 
-fn env_row(
-    ui: &mut Ui,
-    pal: &Palette,
-    name: &str,
-    color: Option<egui::Color32>,
-    selected: bool,
-    active: bool,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-    if selected {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), pal.selection);
-    } else if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), pal.hover);
+fn environments(ctx: &egui::Context, state: &mut NexusState, local: &mut OverlayUi) -> bool {
+    let key = local.env_selected.clone();
+    if local.env_loaded_for.as_ref() != Some(&key) {
+        let env = env_ref(state, key.as_ref());
+        local.env_text = serde_json::to_string_pretty(&Value::Object(
+            env.map(|e| e.data.clone()).unwrap_or_default(),
+        ))
+        .unwrap_or_default();
+        local.env_error = None;
+        local.env_loaded_for = Some(key.clone());
     }
-    ui.painter().circle_filled(
-        egui::pos2(rect.left() + 12.0, rect.center().y),
-        4.0,
-        color.unwrap_or(pal.faint),
-    );
-    ui.painter().text(
-        egui::pos2(rect.left() + 24.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(13.0),
-        pal.text,
-    );
-    if active {
-        ui.painter().text(
-            egui::pos2(rect.right() - 8.0, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            "active",
-            egui::FontId::proportional(11.0),
-            pal.success,
+    let editor_id = egui::Id::new("nexus-env-json");
+    let action = Dialog::new("Manage Environments")
+        .width(780.0)
+        .content(|ui| {
+            keep_enter_in_editor(ui, editor_id);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(200.0, 400.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| env_list(ui, state, local),
+                );
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), 400.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| env_editor(ui, state, local, editor_id),
+                );
+            });
+        })
+        .secondary("Close")
+        .show(ctx);
+    action.is_some()
+}
+
+fn env_list(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi) {
+    let mut rows: Vec<(Option<Id>, String, bool)> = vec![(
+        None,
+        "Base Environment".into(),
+        state.workspace.active_environment.is_none(),
+    )];
+    rows.extend(state.workspace.environments.iter().map(|e| {
+        (
+            Some(e.id.clone()),
+            e.name.clone(),
+            state.workspace.active_environment.as_ref() == Some(&e.id),
+        )
+    }));
+    let mut selected = rows.iter().position(|(id, _, _)| *id == local.env_selected);
+    let out = VirtualList::new("nexus-env-list", rows.len(), &mut selected)
+        .name("Environments")
+        .height(336.0)
+        .show(ui, |i| {
+            let (id, name, active) = &rows[i];
+            let mut row = ListRow::new(name.as_str()).flat(true);
+            row = row.icon(if id.is_none() {
+                Glyph::Globe
+            } else {
+                Glyph::Server
+            });
+            if *active {
+                row = row.trailing(Slot::ui_width(52.0, |ui| {
+                    ui.add(Tag::new("active").tone(Tone::Success));
+                }));
+            }
+            row
+        });
+    if out.selection_changed
+        && let Some(i) = selected
+    {
+        local.env_selected = rows[i].0.clone();
+    }
+    ui.add_space(8.0);
+    if ui
+        .add(Button::secondary("New environment").icon(Glyph::Plus))
+        .clicked()
+    {
+        let env = Environment::new(format!(
+            "Environment {}",
+            state.workspace.environments.len() + 1
+        ));
+        let id = env.id.clone();
+        state.workspace.environments.push(env);
+        state.touch();
+        local.env_selected = Some(id);
+    }
+}
+
+fn env_editor(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, editor_id: egui::Id) {
+    let selected = local.env_selected.clone();
+    let mut delete = false;
+    if let Some(env_id) = &selected {
+        let Some(env) = state
+            .workspace
+            .environments
+            .iter_mut()
+            .find(|e| &e.id == env_id)
+        else {
+            local.env_selected = None;
+            return;
+        };
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(TextField::new(&mut env.name).label("Name").width(280.0))
+                .changed();
+            let mut color = ENV_COLORS
+                .iter()
+                .find(|(_, hex)| env.color.as_deref() == Some(*hex))
+                .map_or("Color", |(name, _)| *name);
+            ui.add(
+                Dropdown::new(
+                    "nexus-env-color",
+                    &mut color,
+                    ENV_COLORS.iter().map(|(name, _)| *name),
+                )
+                .label("Color")
+                .width(110.0),
+            );
+            if let Some((_, hex)) = ENV_COLORS.iter().find(|(name, _)| *name == color)
+                && env.color.as_deref() != Some(*hex)
+            {
+                env.color = Some((*hex).to_owned());
+                changed = true;
+            }
+            if ui.add(Button::danger("Delete")).clicked() {
+                delete = true;
+            }
+        });
+        if changed {
+            state.touch();
+        }
+    } else {
+        ui.label(
+            egui::RichText::new("Base Environment")
+                .font(typography::semibold(ui.ctx(), 14.0))
+                .color(Theme::colors(ui.ctx()).text_strong),
+        );
+        ui.label(
+            egui::RichText::new("Variables here apply to every sub environment.")
+                .color(Theme::colors(ui.ctx()).text_secondary),
         );
     }
-    resp
+    if let Some(env) = env_mut(state, selected.as_ref()) {
+        let mut secrets = env.secrets.join(", ");
+        let resp = ui.add(
+            TextField::new(&mut secrets)
+                .label("Secret keys")
+                .placeholder("token, password — kept out of git"),
+        );
+        if resp.changed() {
+            env.secrets = secrets
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            state.touch();
+        }
+    }
+    ui.add_space(8.0);
+    let vars = Map::new();
+    let mut edited = false;
+    // TODO(kit CodeEditor): replace with the kit code editor once it is on kit main.
+    code_box(ui, 220.0, |ui| {
+        edited = code_editor(ui, &mut local.env_text, Syntax::Json, &vars, editor_id).changed();
+    });
+    if edited {
+        match serde_json::from_str::<Value>(&local.env_text) {
+            Ok(Value::Object(map)) => {
+                local.env_error = None;
+                if let Some(env) = env_mut(state, selected.as_ref()) {
+                    env.data = map;
+                }
+                state.touch();
+            }
+            Ok(_) => local.env_error = Some("The environment must be a JSON object".into()),
+            Err(e) => local.env_error = Some(e.to_string()),
+        }
+    }
+    ui.add_space(4.0);
+    match &local.env_error {
+        Some(e) => {
+            Banner::new(Severity::Error, format!("Invalid JSON: {e}")).show(ui);
+        }
+        None => {
+            ui.label(
+                egui::RichText::new("Use values as {{ name }} or {{ nested.key }} in any field.")
+                    .color(Theme::colors(ui.ctx()).text_secondary),
+            );
+        }
+    }
+    if delete && let Some(env_id) = &selected {
+        state.workspace.environments.retain(|e| &e.id != env_id);
+        if state.workspace.active_environment.as_ref() == Some(env_id) {
+            state.workspace.active_environment = None;
+        }
+        local.env_selected = None;
+        state.touch();
+    }
 }
 
 // ------------------------------------------------------------------ import / export
 
-fn import_dialog(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal: &Palette) {
-    ui.set_width(680.0);
-    title_row(ui, pal, "Import", local);
-    ui.label(RichText::new("Paste a curl command, an Insomnia v4/v5 export, a Postman v2.1 collection or an OpenAPI 3 document (JSON or YAML) — or load it from a file.").color(pal.weak));
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        field_frame(pal).show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut local.import_path)
-                    .frame(false)
-                    .hint_text("/path/to/collection.json")
-                    .desired_width(520.0),
-            );
-        });
-        if secondary_button(ui, "Load file").clicked() {
-            match std::fs::read_to_string(local.import_path.trim()) {
-                Ok(text) => local.import_text = text,
-                Err(e) => {
-                    local.import_result = Some(Err(format!(
-                        "Cannot read {}: {e}",
-                        local.import_path.trim()
-                    )))
+fn import_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut OverlayUi) -> bool {
+    let editor_id = egui::Id::new("nexus-import-text");
+    let importable = !local.import_text.trim().is_empty();
+    let focus = std::mem::take(&mut local.focus_pending);
+    let action = Dialog::new("Import")
+        .width(700.0)
+        .message(
+            "Paste a curl command, an Insomnia v4/v5 export, a Postman v2.1 collection or an \
+             OpenAPI 3 document (JSON or YAML), or load it from a file. Ctrl+Enter imports.",
+        )
+        .content(|ui| {
+            keep_enter_in_editor(ui, editor_id);
+            ui.horizontal(|ui| {
+                let width = ui.available_width() - 100.0;
+                ui.add(
+                    TextField::new(&mut local.import_path)
+                        .label("File")
+                        .placeholder("/path/to/collection.json")
+                        .monospace(true)
+                        .width(width),
+                );
+                if ui.add(Button::secondary("Load file")).clicked() {
+                    match std::fs::read_to_string(local.import_path.trim()) {
+                        Ok(text) => local.import_text = text,
+                        Err(e) => {
+                            local.import_result = Some(Err(format!(
+                                "Cannot read {}: {e}",
+                                local.import_path.trim()
+                            )));
+                        }
+                    }
                 }
+            });
+            ui.add(Checkbox::new(
+                &mut local.import_merge,
+                "Add to the current workspace",
+            ));
+            let vars = Map::new();
+            // TODO(kit CodeEditor): replace with the kit code editor once it is on kit main.
+            code_box(ui, 240.0, |ui| {
+                if focus {
+                    ui.memory_mut(|m| m.request_focus(editor_id));
+                }
+                code_editor(ui, &mut local.import_text, Syntax::Json, &vars, editor_id);
+            });
+            match &local.import_result {
+                Some(Ok(text)) => {
+                    Banner::new(Severity::Success, text.as_str()).show(ui);
+                }
+                Some(Err(text)) => {
+                    Banner::new(Severity::Error, text.as_str()).show(ui);
+                }
+                None => {}
             }
+        })
+        .primary("Import")
+        .primary_enabled(importable)
+        .secondary("Close")
+        .show(ctx);
+    match action {
+        Some(DialogAction::Primary) => {
+            local.import_result = Some(run_import(state, &local.import_text, local.import_merge));
+            if matches!(local.import_result, Some(Ok(_))) {
+                local.import_text.clear();
+            }
+            false
         }
-    });
-    ui.add_space(8.0);
-    let vars = Map::new();
-    field_frame(pal)
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_height(260.0);
-            code_editor(
-                ui,
-                &mut local.import_text,
-                Syntax::Json,
-                &vars,
-                ui.id().with("import"),
-            );
-        });
-    ui.add_space(8.0);
-    if let Some(result) = &local.import_result {
-        let (text, color) = match result {
-            Ok(t) => (t.as_str(), pal.success),
-            Err(e) => (e.as_str(), pal.error),
-        };
-        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
-        ui.add_space(6.0);
+        Some(_) => true,
+        None => false,
     }
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut local.import_merge, "Add to the current workspace");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if primary_button(ui, "Import", !local.import_text.trim().is_empty()).clicked() {
-                local.import_result =
-                    Some(run_import(state, &local.import_text, local.import_merge));
-                if matches!(local.import_result, Some(Ok(_))) {
-                    local.import_text.clear();
-                }
-            }
-            if secondary_button(ui, "Cancel").clicked() {
-                local.open = Overlay::None;
-            }
-        });
-    });
 }
 
 fn run_import(state: &mut NexusState, text: &str, merge: bool) -> Result<String, String> {
@@ -589,9 +538,7 @@ fn run_import(state: &mut NexusState, text: &str, merge: bool) -> Result<String,
     Ok(message)
 }
 
-fn export_dialog(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal: &Palette) {
-    ui.set_width(560.0);
-    title_row(ui, pal, "Export Workspace", local);
+fn export_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut OverlayUi) -> bool {
     if local.export_path.is_empty() {
         let slug: String = state
             .workspace
@@ -611,46 +558,57 @@ fn export_dialog(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal
             .display()
             .to_string();
     }
-    ui.label(
-        RichText::new("Writes a single-file nexus-http export. Secret values are left out.")
-            .color(pal.weak),
-    );
-    ui.add_space(8.0);
-    field_frame(pal).show(ui, |ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut local.export_path)
-                .frame(false)
-                .desired_width(ui.available_width()),
-        );
-    });
-    ui.add_space(10.0);
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        if primary_button(ui, "Export", true).clicked() {
+    let focus = std::mem::take(&mut local.focus_pending);
+    let exportable = !local.export_path.trim().is_empty();
+    let action = Dialog::new("Export Workspace")
+        .width(560.0)
+        .message("Writes a single-file nexus-http export. Secret values are left out.")
+        .content(|ui| {
+            let field = ui.add(
+                TextField::new(&mut local.export_path)
+                    .label("File")
+                    .monospace(true),
+            );
+            if focus {
+                field.request_focus();
+            }
+            if let Some(error) = &local.export_error {
+                Banner::new(Severity::Error, error.as_str()).show(ui);
+            }
+        })
+        .primary("Export")
+        .primary_enabled(exportable)
+        .secondary("Cancel")
+        .show(ctx);
+    match action {
+        Some(DialogAction::Primary) => {
             let text = import::export(&state.workspace);
             match std::fs::write(local.export_path.trim(), text) {
                 Ok(()) => {
                     state.notify(format!("Exported to {}", local.export_path.trim()));
-                    local.open = Overlay::None;
+                    true
                 }
-                Err(e) => state.notify(format!("Export failed: {e}")),
+                Err(e) => {
+                    local.export_error = Some(format!("Export failed: {e}"));
+                    false
+                }
             }
         }
-        if secondary_button(ui, "Cancel").clicked() {
-            local.open = Overlay::None;
-        }
-    });
+        Some(_) => true,
+        None => false,
+    }
 }
 
 // ------------------------------------------------------------------ code generation
 
-fn code_dialog(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal: &Palette) {
-    ui.set_width(820.0);
-    ui.set_height(500.0);
-    title_row(ui, pal, "Generate Code", local);
+fn code_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut OverlayUi) -> bool {
     let target = *local.target.get_or_insert(Target::Curl);
     let Some(id) = state.selected.clone() else {
-        ui.label("Select a request first.");
-        return;
+        let action = Dialog::new("Generate Code")
+            .message("Select a request first.")
+            .secondary("Close")
+            .show(ctx);
+        return action.is_some();
     };
     let code = prepare(
         &state.workspace,
@@ -662,59 +620,59 @@ fn code_dialog(ui: &mut Ui, state: &mut NexusState, local: &mut OverlayUi, pal: 
     )
     .map(|p| codegen::generate(&p, target))
     .map_err(|e| e.to_string());
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            vec2(190.0, ui.available_height()),
-            Layout::top_down(Align::Min),
-            |ui| {
-                for t in Target::ALL {
-                    let (rect, resp) = ui.allocate_exact_size(vec2(180.0, 28.0), Sense::click());
-                    if t == target {
-                        ui.painter()
-                            .rect_filled(rect, CornerRadius::same(6), pal.selection);
-                    } else if resp.hovered() {
-                        ui.painter()
-                            .rect_filled(rect, CornerRadius::same(6), pal.hover);
+    let mut picked = Target::ALL.iter().position(|t| *t == target);
+    let action = Dialog::new("Generate Code")
+        .width(840.0)
+        .content(|ui| {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(190.0, 360.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        VirtualList::new("nexus-code-targets", Target::ALL.len(), &mut picked)
+                            .name("Languages")
+                            .height(360.0)
+                            .show(ui, |i| ListRow::new(Target::ALL[i].label()).flat(true));
+                    },
+                );
+                ui.vertical(|ui| match &code {
+                    Ok(code) => {
+                        ui.label(
+                            egui::RichText::new(
+                                "Variables and template tags are resolved with the active \
+                                 environment.",
+                            )
+                            .color(Theme::colors(ui.ctx()).text_secondary),
+                        );
+                        ui.add_space(6.0);
+                        // TODO(kit CodeEditor): replace with the kit code view once it is on
+                        // kit main.
+                        code_box(ui, 330.0, |ui| {
+                            code_view(ui, code, Syntax::Plain, "generated");
+                        });
                     }
-                    ui.painter().text(
-                        egui::pos2(rect.left() + 10.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        t.label(),
-                        egui::FontId::proportional(13.0),
-                        pal.text,
-                    );
-                    if resp.clicked() {
-                        local.target = Some(t);
+                    Err(e) => {
+                        Banner::new(Severity::Error, e.as_str()).show(ui);
                     }
-                }
-            },
-        );
-        ui.vertical(|ui| match &code {
-            Ok(code) => {
-                ui.horizontal(|ui| {
-                    caption(
-                        ui,
-                        "Variables and template tags are resolved with the active environment.",
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if secondary_button(ui, "Copy").clicked() {
-                            ui.ctx().copy_text(code.clone());
-                            state.notify("Code copied to the clipboard");
-                        }
-                    });
                 });
-                ui.add_space(6.0);
-                field_frame(pal)
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
-                        ui.set_height(ui.available_height() - 6.0);
-                        ui.set_width(ui.available_width());
-                        code_view(ui, code, Syntax::Plain, "generated");
-                    });
+            });
+        })
+        .primary("Copy")
+        .primary_enabled(code.is_ok())
+        .secondary("Close")
+        .show(ctx);
+    if let Some(i) = picked {
+        local.target = Some(Target::ALL[i]);
+    }
+    match action {
+        Some(DialogAction::Primary) => {
+            if let Ok(code) = code {
+                ctx.copy_text(code);
+                state.notify("Code copied to the clipboard");
             }
-            Err(e) => {
-                ui.label(RichText::new(e).color(pal.error));
-            }
-        });
-    });
+            false
+        }
+        Some(_) => true,
+        None => false,
+    }
 }

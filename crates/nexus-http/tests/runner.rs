@@ -22,7 +22,11 @@ fn server() -> String {
     let port = server.server_addr().to_ip().unwrap().port();
     std::thread::spawn(move || {
         for request in server.incoming_requests() {
-            let code = if request.url().starts_with("/ok") { 200 } else { 500 };
+            let code = if request.url().starts_with("/ok") {
+                200
+            } else {
+                500
+            };
             let _ = request.respond(tiny_http::Response::from_string("{}").with_status_code(code));
         }
     });
@@ -33,11 +37,9 @@ fn screen(base: &str) -> Screen {
     let mut workspace = Workspace::new("Test");
     for (name, path) in [("First", "/ok1"), ("Second", "/ok2"), ("Broken", "/broken")] {
         let mut request = Request::new(name, Method::Get, format!("{base}{path}"));
-        request.assertions.push(Assertion::new(
-            Source::Status,
-            Operator::Equals,
-            "200",
-        ));
+        request
+            .assertions
+            .push(Assertion::new(Source::Status, Operator::Equals, "200"));
         workspace.items.push(Item::Request(request));
     }
     Screen {
@@ -113,7 +115,9 @@ fn empty_scope_disables_run() {
     let mut s = screen("http://127.0.0.1:9");
     s.state.workspace.items.clear();
     let h = harness(s);
-    assert!(testing::NodeExt::is_disabled(&h.get_by_label_contains("Run 0 request")));
+    assert!(testing::NodeExt::is_disabled(
+        &h.get_by_label_contains("Run 0 request")
+    ));
     h.get_by_label("Nothing to run");
 }
 

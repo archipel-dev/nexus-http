@@ -11,8 +11,8 @@ use crate::widgets::{Syntax, code_view};
 use archipel_kit::behaviour::WidgetExt;
 use archipel_kit::components::{
     Banner, Button, Cell, Column, Dropdown, EmptyState, IconButton, ListRow, ProgressBar,
-    SectionHeader, SegmentedControl, Severity, Spinner, Table, Tag, TextField, Tooltip,
-    TooltipExt, VirtualList,
+    SectionHeader, SegmentedControl, Severity, Spinner, Table, Tag, TextField, Tooltip, TooltipExt,
+    VirtualList,
 };
 use archipel_kit::tokens::size;
 use archipel_kit::{Glyph, Tone, egui};
@@ -64,7 +64,11 @@ pub(crate) struct TableState {
 
 impl TableState {
     /// Creates the columns once, then lets the last one fill the width.
-    pub(crate) fn columns(&mut self, ui: &Ui, spec: &[(&str, f32, bool)]) -> (&mut [Column], &mut Option<usize>) {
+    pub(crate) fn columns(
+        &mut self,
+        ui: &Ui,
+        spec: &[(&str, f32, bool)],
+    ) -> (&mut [Column], &mut Option<usize>) {
         if self.columns.is_empty() {
             self.columns = spec
                 .iter()
@@ -392,21 +396,16 @@ fn headers(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
     let height = rows_height(ui);
     let state = &mut local.headers;
     let (columns, selected) = state.columns(ui, &[("Name", 220.0, true), ("Value", 400.0, true)]);
-    Table::new(
-        "resp-headers",
-        columns,
-        response.headers.len(),
-        selected,
-    )
-    .name("Response headers")
-    .height(height)
-    .show(ui, |row, col| {
-        let (name, value) = &response.headers[row];
-        match col {
-            0 => Cell::new(name.as_str()).tone(Tone::Accent),
-            _ => Cell::new(value.as_str()),
-        }
-    });
+    Table::new("resp-headers", columns, response.headers.len(), selected)
+        .name("Response headers")
+        .height(height)
+        .show(ui, |row, col| {
+            let (name, value) = &response.headers[row];
+            match col {
+                0 => Cell::new(name.as_str()).tone(Tone::Accent),
+                _ => Cell::new(value.as_str()),
+            }
+        });
 }
 
 fn cookies_tab(ui: &mut Ui, response: &Response, state: &mut NexusState, local: &mut ResponseUi) {
@@ -415,16 +414,13 @@ fn cookies_tab(ui: &mut Ui, response: &Response, state: &mut NexusState, local: 
     if set.is_empty() {
         ui.label("This response set no cookies");
     } else {
-        let (columns, selected) = local.set_cookies.columns(ui, &[("Set-Cookie", 400.0, true)]);
-        Table::new(
-            "resp-set-cookies",
-            columns,
-            set.len(),
-            selected,
-        )
-        .name("Cookies set by this response")
-        .height((size::ROW_HEIGHT * set.len() as f32).min(120.0))
-        .show(ui, |row, _| Cell::new(set[row]));
+        let (columns, selected) = local
+            .set_cookies
+            .columns(ui, &[("Set-Cookie", 400.0, true)]);
+        Table::new("resp-set-cookies", columns, set.len(), selected)
+            .name("Cookies set by this response")
+            .height((size::ROW_HEIGHT * set.len() as f32).min(120.0))
+            .show(ui, |row, _| Cell::new(set[row]));
     }
     ui.add(SectionHeader::new(format!(
         "Workspace cookie jar · {}",
@@ -479,22 +475,19 @@ fn timeline(ui: &mut Ui, response: &Response, local: &mut ResponseUi) {
         })
         .collect();
     let height = rows_height(ui);
-    let (columns, selected) = local.timeline.columns(ui, &[("Dir", 40.0, true), ("Message", 400.0, true)]);
-    Table::new(
-        "resp-timeline",
-        columns,
-        lines.len(),
-        selected,
-    )
-    .name("Timeline")
-    .height(height)
-    .show(ui, |row, col| {
-        let (prefix, tone, text) = lines[row];
-        match col {
-            0 => Cell::new(prefix).tone(tone),
-            _ => Cell::new(text).tone(tone),
-        }
-    });
+    let (columns, selected) = local
+        .timeline
+        .columns(ui, &[("Dir", 40.0, true), ("Message", 400.0, true)]);
+    Table::new("resp-timeline", columns, lines.len(), selected)
+        .name("Timeline")
+        .height(height)
+        .show(ui, |row, col| {
+            let (prefix, tone, text) = lines[row];
+            match col {
+                0 => Cell::new(prefix).tone(tone),
+                _ => Cell::new(text).tone(tone),
+            }
+        });
 }
 
 fn tests(ui: &mut Ui, checks: &[AssertionResult], local: &mut ResponseUi) {
@@ -627,7 +620,10 @@ fn stream_view(
                     if let Some(eid) = &event.id {
                         meta = format!("{meta} · id {eid}");
                     }
-                    let row = ListRow::new(text).icon(glyph).icon_tone(tone).secondary(meta);
+                    let row = ListRow::new(text)
+                        .icon(glyph)
+                        .icon_tone(tone)
+                        .secondary(meta);
                     if event.direction == Direction::Error {
                         row.label_tone(Tone::Error)
                     } else {

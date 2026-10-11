@@ -1,8 +1,8 @@
 //! Collection runner view: scope and options, live progress and per-request
 //! results with assertion details.
 
-use crate::state::NexusState;
 use super::response::{TableState, rows_height};
+use crate::state::NexusState;
 use archipel_kit::behaviour::WidgetExt;
 use archipel_kit::components::{
     Button, Cell, Checkbox, Dropdown, EmptyState, IconButton, ListRow, ProgressBar, SectionHeader,
@@ -317,7 +317,9 @@ fn options_row(
                 .enabled(!running)
                 .width(80.0),
         );
-        if edit.changed() && let Ok(n @ 1..=100) = local.iterations_text.trim().parse::<u32>() {
+        if edit.changed()
+            && let Ok(n @ 1..=100) = local.iterations_text.trim().parse::<u32>()
+        {
             local.options.iterations = n;
         }
 
@@ -341,7 +343,10 @@ fn options_row(
         );
         ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
             if running {
-                if ui.add(Button::secondary("Stop").icon(Glyph::Stop)).clicked() {
+                if ui
+                    .add(Button::secondary("Stop").icon(Glyph::Stop))
+                    .clicked()
+                {
                     local.stop();
                 }
             } else {
@@ -383,37 +388,32 @@ fn plan_table(ui: &mut Ui, state: &NexusState, local: &mut RunnerUi, planned: &[
             ("Folder", 300.0, false),
         ],
     );
-    Table::new(
-        "runner-plan",
-        columns,
-        rows.len(),
-        selected,
-    )
-    .name("Requests to run")
-    .height(height)
-    .show(ui, |row, col| {
-        let (folders, request) = &rows[row];
-        match col {
-            0 => {
-                let method = request.method.to_string();
-                Cell::new(method.clone()).tone(Tone::method(&method))
+    Table::new("runner-plan", columns, rows.len(), selected)
+        .name("Requests to run")
+        .height(height)
+        .show(ui, |row, col| {
+            let (folders, request) = &rows[row];
+            match col {
+                0 => {
+                    let method = request.method.to_string();
+                    Cell::new(method.clone()).tone(Tone::method(&method))
+                }
+                1 => Cell::new(request.name.as_str()),
+                2 => Cell::new(match request.assertions.len() {
+                    0 => String::new(),
+                    n => n.to_string(),
+                })
+                .muted(),
+                _ => Cell::new(
+                    folders
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                )
+                .muted(),
             }
-            1 => Cell::new(request.name.as_str()),
-            2 => Cell::new(match request.assertions.len() {
-                0 => String::new(),
-                n => n.to_string(),
-            })
-            .muted(),
-            _ => Cell::new(
-                folders
-                    .iter()
-                    .map(|f| f.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / "),
-            )
-            .muted(),
-        }
-    });
+        });
 }
 
 fn results(ui: &mut Ui, local: &mut RunnerUi) {
@@ -433,40 +433,35 @@ fn results(ui: &mut Ui, local: &mut RunnerUi) {
             ("Time", 90.0, true),
         ],
     );
-    let out = Table::new(
-        "runner-results",
-        columns,
-        steps.len(),
-        selected,
-    )
-    .name("Run results")
-    .height(table_h)
-    .show(ui, |row, col| {
-        let step = &steps[row];
-        match col {
-            0 if step.passed() => Cell::new("Pass").icon(Glyph::Check).tone(Tone::Success),
-            0 => Cell::new("Fail").icon(Glyph::Close).tone(Tone::Error),
-            1 => Cell::new(step.method.as_str()).tone(Tone::method(&step.method)),
-            2 => Cell::new(step.name.as_str()),
-            3 if iterations => Cell::new(format!("#{}", step.iteration)).muted(),
-            3 => Cell::new(""),
-            4 => match step.status {
-                Some(s) => Cell::new(s.to_string()).tone(Tone::status(s)),
-                None => Cell::new("error").tone(Tone::Error),
-            },
-            5 if step.assertions.is_empty() => Cell::new(""),
-            5 => {
-                let ok = step.assertions.iter().filter(|a| a.passed).count();
-                let cell = Cell::new(format!("{ok}/{}", step.assertions.len()));
-                if ok == step.assertions.len() {
-                    cell.muted()
-                } else {
-                    cell.tone(Tone::Error)
+    let out = Table::new("runner-results", columns, steps.len(), selected)
+        .name("Run results")
+        .height(table_h)
+        .show(ui, |row, col| {
+            let step = &steps[row];
+            match col {
+                0 if step.passed() => Cell::new("Pass").icon(Glyph::Check).tone(Tone::Success),
+                0 => Cell::new("Fail").icon(Glyph::Close).tone(Tone::Error),
+                1 => Cell::new(step.method.as_str()).tone(Tone::method(&step.method)),
+                2 => Cell::new(step.name.as_str()),
+                3 if iterations => Cell::new(format!("#{}", step.iteration)).muted(),
+                3 => Cell::new(""),
+                4 => match step.status {
+                    Some(s) => Cell::new(s.to_string()).tone(Tone::status(s)),
+                    None => Cell::new("error").tone(Tone::Error),
+                },
+                5 if step.assertions.is_empty() => Cell::new(""),
+                5 => {
+                    let ok = step.assertions.iter().filter(|a| a.passed).count();
+                    let cell = Cell::new(format!("{ok}/{}", step.assertions.len()));
+                    if ok == step.assertions.len() {
+                        cell.muted()
+                    } else {
+                        cell.tone(Tone::Error)
+                    }
                 }
+                _ => Cell::new(format_duration(step.duration_ms)).muted(),
             }
-            _ => Cell::new(format_duration(step.duration_ms)).muted(),
-        }
-    });
+        });
     if out.selection_changed || out.activated.is_some() {
         local.details = local.results_table.selected;
     }

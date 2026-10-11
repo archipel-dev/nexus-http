@@ -233,7 +233,7 @@ dependencies = [
 [[package]]
 name = "archipel-icons"
 version = "0.1.0"
-source = "git+https://github.com/archipel-dev/kit?branch=main#a8b6a7ae9b9a2acdb315d929329d47dfa5e14183"
+source = "git+https://github.com/archipel-dev/kit?branch=main#49472af3b8443c8b9090ed9716c5edbb9102f114"
 dependencies = [
  "egui",
 ]
@@ -241,7 +241,7 @@ dependencies = [
 [[package]]
 name = "archipel-kit"
 version = "0.1.0"
-source = "git+https://github.com/archipel-dev/kit?branch=main#a8b6a7ae9b9a2acdb315d929329d47dfa5e14183"
+source = "git+https://github.com/archipel-dev/kit?branch=main#49472af3b8443c8b9090ed9716c5edbb9102f114"
 dependencies = [
  "archipel-icons",
  "egui",
@@ -782,7 +782,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -792,7 +792,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
