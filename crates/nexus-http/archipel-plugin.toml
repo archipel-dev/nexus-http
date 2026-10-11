@@ -1,0 +1,15 @@
+id = "dev.archipel.nexus-http"
+name = "Nexus HTTP"
+# Placeholder: replaced with CARGO_PKG_VERSION when the manifest is parsed, so it never drifts.
+version = "@VERSION@"
+api_version = 1
+kind = "rust"
+vendor = "Archipel"
+license = "Apache-2.0 OR MIT"
+description = "HTTP client: requests, environments, auth, GraphQL, WebSocket, SSE and gRPC, import/export and code generation."
+capabilities = ["view", "http-client"]
+permissions = ["network", "fs.user", "fs.project"]
+
+[app]
+view = "nexus.main"
+title = "Nexus HTTP"

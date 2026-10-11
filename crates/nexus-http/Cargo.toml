@@ -9,12 +9,14 @@ description = "Nexus HTTP: the views of the Archipel API client (egui on archipe
 
 [dependencies]
 archipel-kit.workspace = true
+archipel-sdk.workspace = true
 egui.workspace = true
 nexus-http-core.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
 url.workspace = true
 
 [dev-dependencies]
+archipel-sdk = { workspace = true, features = ["testing"] }
 archipel-kit = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 

@@ -17,6 +17,7 @@ serde_json = "1.0"
 thiserror = "2.0"
 url = "2"
 wgpu = { version = "27", default-features = false, features = ["vulkan", "gles"] }
+archipel-sdk = { git = "https://github.com/archipel-dev/sdk", branch = "main" }
 archipel-kit = { git = "https://github.com/archipel-dev/kit", branch = "main" }
 nexus-http-core = { path = "crates/nexus-http-core" }
 nexus-http = { path = "crates/nexus-http" }

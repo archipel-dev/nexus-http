@@ -8,10 +8,13 @@
 pub mod complete;
 pub mod graphql_ui;
 pub mod oauth;
+pub mod plugin;
 pub mod state;
 pub mod theme;
 pub mod views;
 pub mod widgets;
+
+pub use plugin::NexusHttpPlugin;
 
 use egui::{
     CornerRadius, CursorIcon, Key, KeyboardShortcut, Modifiers, Rect, Sense, Ui, pos2, vec2,
