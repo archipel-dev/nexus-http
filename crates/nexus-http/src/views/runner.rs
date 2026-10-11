@@ -399,7 +399,11 @@ fn plan_table(ui: &mut Ui, state: &NexusState, local: &mut RunnerUi, planned: &[
             let (folders, request) = &rows[row];
             match col {
                 0 => {
-                    let method = request.method.to_string();
+                    let method = match request.protocol {
+                        nexus_http_core::model::Protocol::Sse => "SSE".to_owned(),
+                        nexus_http_core::model::Protocol::WebSocket => "WS".to_owned(),
+                        _ => request.method.to_string(),
+                    };
                     Cell::new(method.clone()).tone(Tone::method(&method))
                 }
                 1 => Cell::new(request.name.as_str()),
@@ -428,7 +432,7 @@ fn results(ui: &mut Ui, local: &mut RunnerUi) {
     let (columns, selected) = local.results_table.columns(
         ui,
         &[
-            ("Result", 80.0, false),
+            ("Result", 100.0, false),
             ("Method", 80.0, true),
             ("Request", 240.0, false),
             ("Iteration", 80.0, false),

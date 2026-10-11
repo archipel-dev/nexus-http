@@ -156,8 +156,8 @@ fn run_stream(
         if left.is_zero() {
             break;
         }
-        match session.recv_timeout(left.min(Duration::from_millis(100))) {
-            Some(e) => match e.direction {
+        if let Some(e) = session.recv_timeout(left.min(Duration::from_millis(100))) {
+            match e.direction {
                 Direction::Incoming => messages.push(e.data),
                 Direction::Info if e.label == "open" => opened = true,
                 Direction::Error => {
@@ -165,8 +165,7 @@ fn run_stream(
                     break;
                 }
                 _ => {}
-            },
-            None => {}
+            }
         }
     }
     session.close();
