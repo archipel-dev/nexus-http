@@ -1,0 +1,15 @@
+# Speed budgets of the standalone app, checked by `cargo xtask perf` (CI job `perf`).
+# A run above any limit fails. See docs/performance.md for what each number means.
+# Change a limit only in a PR that says why; the charter values are 400 ms, 16 ms, 1 %.
+
+[budgets]
+# Median of 5 runs: process spawn to the first presented frame with the demo workspace.
+cold_start_ms = 400.0
+# 99th percentile of update + tessellation over the scripted interactions.
+frame_p99_ms = 16.0
+# Process CPU over 10 s of idle, as a share of one core.
+idle_cpu_percent = 1.0
+# Frames the real window may paint while idle (repaint must not run continuously).
+idle_frames = 2
+# Peak resident memory (VmHWM) after the script, software rendering (lavapipe).
+peak_rss_mb = 150.0
