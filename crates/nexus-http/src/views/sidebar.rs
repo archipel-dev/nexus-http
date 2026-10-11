@@ -1,19 +1,31 @@
 //! Collection sidebar: workspace header, environment picker, filter, and the
-//! folder/request tree with context menus, inline rename and drag & drop.
+//! folder/request tree with context menus, inline rename and drag & drop, all on
+//! archipel-kit.
 
 use crate::state::NexusState;
-use crate::theme::{Palette, semibold};
-use crate::widgets::{self, Icon, icon_button, paint_icon};
-use egui::{Align2, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
-use nexus_http_core::model::{Id, Item};
-
-const ROW_H: f32 = 28.0;
-const INDENT: f32 = 14.0;
+use archipel_kit::behaviour::{Behaviour, ContextMenu, DragSource, DropTarget};
+use archipel_kit::components::{
+    Avatar, Dropdown, EmptyState, IconButton, ListRow, MenuItem, MenuSeparator, Tag, TextField,
+    VirtualList,
+};
+use archipel_kit::parts::{Popover, Slot};
+use archipel_kit::tokens::{size, typography};
+use archipel_kit::{Glyph, Theme, Tone, cursor, egui};
+use egui::{Key, Modifiers, Rect, Response, Ui, pos2, vec2};
+use nexus_http_core::model::{Id, Item, Protocol, Request};
+use std::cell::{Cell, RefCell};
+use std::fmt;
 
 #[derive(Default)]
 pub struct SidebarUi {
+    /// The row being renamed: (item, edit buffer, focus the field on the next frame).
     renaming: Option<(Id, String, bool)>,
-    run_request: Option<Id>,
+    /// The row the keyboard cursor is on (requests and folders).
+    cursor: Option<Id>,
+    /// The request selected in the state when `cursor` was last synced.
+    last_selected: Option<Id>,
+    workspace_menu: bool,
+    add_menu: bool,
 }
 
 #[derive(Default)]
@@ -28,11 +40,66 @@ pub struct SidebarActions {
 /// Where a dragged item lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Drop {
-    Before(Id),
     After(Id),
     Into(Id),
     /// End of the top level.
     End,
+}
+
+/// A row of the flattened, visible tree.
+struct Row {
+    id: Id,
+    name: String,
+    depth: usize,
+    /// `Some(open)` for folders.
+    folder: Option<bool>,
+    /// Method (or protocol) tag of a request.
+    tag: Option<(String, Tone)>,
+}
+
+/// What the rows report while they draw; applied after the list is done.
+#[derive(Default)]
+struct Sink {
+    menu: Option<(Id, MenuAction)>,
+    drop: Option<(Id, Drop)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    NewRequest,
+    NewFolder,
+    RunFolder,
+    Send,
+    Rename,
+    Duplicate,
+    Delete,
+}
+
+/// The environment dropdown's options.
+#[derive(Clone, PartialEq)]
+struct EnvChoice {
+    id: Option<Id>,
+    name: String,
+}
+
+impl fmt::Display for EnvChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+/// A [`DropTarget`] that reports into a shared sink as a [`Drop`] at `target`.
+struct DropOn<'a>(&'a RefCell<Sink>, Drop);
+
+impl Behaviour for DropOn<'_> {
+    fn attach(self, ui: &mut Ui, response: Response) -> Response {
+        let mut dropped: Option<Id> = None;
+        let response = DropTarget::new(&mut dropped).attach(ui, response);
+        if let Some(dragged) = dropped {
+            self.0.borrow_mut().drop = Some((dragged, self.1));
+        }
+        response
+    }
 }
 
 pub fn show(
@@ -41,195 +108,157 @@ pub fn show(
     local: &mut SidebarUi,
     actions: &mut SidebarActions,
 ) {
-    let pal = Palette::of(ui);
-    ui.add_space(10.0);
-    // Workspace header
+    let colors = Theme::colors(ui.ctx());
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        let name = state.workspace.name.clone();
+        ui.add_space(size::CONTENT_INSET);
+        ui.add(Avatar::new(state.workspace.name.clone()).size(20.0));
         ui.label(
-            RichText::new(name)
-                .font(semibold(ui, 14.0))
-                .color(pal.strong),
+            egui::RichText::new(&state.workspace.name)
+                .font(typography::semibold(ui.ctx(), 14.0))
+                .color(colors.text_strong),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
-            let more = icon_button(ui, Icon::Dots, pal.weak, "Workspace actions");
-            egui::Popup::menu(&more).width(200.0).show(|ui| {
-                if ui.button("Import…").clicked() {
-                    actions.open_import = true;
-                }
-                if ui.button("Run collection…").clicked() {
-                    actions.run = Some(None);
-                }
-                if ui.button("Export workspace…").clicked() {
-                    actions.export = true;
-                }
-                if ui.button("Manage environments…").clicked() {
-                    actions.open_environments = true;
-                }
-            });
+            let more = ui.add(IconButton::new(Glyph::More, "Workspace actions"));
+            if more.clicked() {
+                local.workspace_menu = !local.workspace_menu;
+            }
+            let mut menu = local.workspace_menu;
+            let closed = Popover::below("nexus-workspace-menu", &more)
+                .width(210.0)
+                .show(ui.ctx(), &mut menu, |ui| {
+                    let mut chosen = false;
+                    if ui
+                        .add(MenuItem::new("Import…").icon(Glyph::Download))
+                        .clicked()
+                    {
+                        actions.open_import = true;
+                        chosen = true;
+                    }
+                    if ui
+                        .add(MenuItem::new("Run collection…").icon(Glyph::Run))
+                        .clicked()
+                    {
+                        actions.run = Some(None);
+                        chosen = true;
+                    }
+                    if ui
+                        .add(MenuItem::new("Export workspace…").icon(Glyph::Upload))
+                        .clicked()
+                    {
+                        actions.export = true;
+                        chosen = true;
+                    }
+                    ui.add(MenuSeparator);
+                    if ui
+                        .add(MenuItem::new("Manage environments…").icon(Glyph::Settings))
+                        .clicked()
+                    {
+                        actions.open_environments = true;
+                        chosen = true;
+                    }
+                    chosen
+                });
+            local.workspace_menu = menu && !closed.unwrap_or(false);
         });
     });
     ui.add_space(6.0);
-    environment_picker(ui, state, &pal, actions);
+    environment_picker(ui, state, actions);
     ui.add_space(8.0);
 
-    // Filter + new
     ui.horizontal(|ui| {
-        ui.add_space(10.0);
-        let w = ui.available_width() - 44.0;
-        widgets::field_frame(&pal)
-            .inner_margin(egui::Margin::symmetric(6, 3))
-            .show(ui, |ui| {
-                ui.set_width(w - 14.0);
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
-                    paint_icon(ui.painter(), r, Icon::Search, pal.faint);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut state.filter)
-                            .frame(false)
-                            .hint_text("Filter")
-                            .desired_width(ui.available_width()),
-                    );
+        ui.add_space(size::CONTENT_INSET);
+        let width = ui.available_width() - size::CONTROL_HEIGHT - 12.0;
+        let filter = ui.add(
+            TextField::search(&mut state.filter)
+                .placeholder("Filter requests")
+                .width(width),
+        );
+        // The text edit gives up the focus on Escape, so look at the key it just saw.
+        if (filter.has_focus() || filter.lost_focus())
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            state.filter.clear();
+        }
+        let plus = ui.add(IconButton::new(Glyph::Plus, "New request or folder"));
+        if plus.clicked() {
+            local.add_menu = !local.add_menu;
+        }
+        let mut menu = local.add_menu;
+        let closed =
+            Popover::below("nexus-add-menu", &plus)
+                .width(190.0)
+                .show(ui.ctx(), &mut menu, |ui| {
+                    let mut chosen = false;
+                    if ui
+                        .add(MenuItem::new("New Request").icon(Glyph::NewFile))
+                        .clicked()
+                    {
+                        state.new_request(None);
+                        chosen = true;
+                    }
+                    if ui
+                        .add(MenuItem::new("New Folder").icon(Glyph::NewFolder))
+                        .clicked()
+                    {
+                        let id = state.new_folder(None);
+                        local.renaming = Some((id, "New Folder".into(), true));
+                        chosen = true;
+                    }
+                    ui.add(MenuSeparator);
+                    if ui
+                        .add(MenuItem::new("Import…").icon(Glyph::Download))
+                        .clicked()
+                    {
+                        actions.open_import = true;
+                        chosen = true;
+                    }
+                    chosen
                 });
-            });
-        let plus = icon_button(ui, Icon::Plus, pal.weak, "New request or folder");
-        egui::Popup::menu(&plus).width(180.0).show(|ui| {
-            if ui.button("New Request").clicked() {
-                state.new_request(None);
-            }
-            if ui.button("New Folder").clicked() {
-                let id = state.new_folder(None);
-                local.renaming = Some((id, "New Folder".into(), true));
-            }
-            ui.separator();
-            if ui.button("Import…").clicked() {
-                actions.open_import = true;
-            }
-        });
+        local.add_menu = menu && !closed.unwrap_or(false);
     });
     ui.add_space(6.0);
 
-    let filter = state.filter.trim().to_lowercase();
-    let items = state.workspace.items.clone();
-    let mut drop: Option<(Id, Drop)> = None;
-    egui::ScrollArea::vertical()
-        .id_salt("nexus-tree")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if items.is_empty() {
-                widgets::empty_state(ui, "No requests yet", "Press Ctrl+N or use + to add one.");
-                return;
-            }
-            for item in &items {
-                tree_item(ui, state, local, item, 0, &filter, &pal, &mut drop);
-            }
-            // Space below the tree accepts drops to the end of the top level.
-            let (rest, resp) = ui.allocate_exact_size(
-                vec2(ui.available_width(), ui.available_height().max(24.0)),
-                Sense::hover(),
-            );
-            if resp.dnd_hover_payload::<Id>().is_some() {
-                ui.painter().hline(
-                    rest.x_range(),
-                    rest.top() + 1.0,
-                    Stroke::new(2.0_f32, pal.accent),
-                );
-                if let Some(released) = resp.dnd_release_payload::<Id>() {
-                    drop = Some(((*released).clone(), Drop::End));
-                }
-            }
-        });
-
-    if let Some((dragged, target)) = drop {
-        apply_drop(state, &dragged, target);
-    }
-    if let Some(folder) = local.run_request.take() {
-        actions.run = Some(Some(folder));
-    }
+    tree(ui, state, local, actions);
 }
 
-fn environment_picker(
-    ui: &mut Ui,
-    state: &mut NexusState,
-    pal: &Palette,
-    actions: &mut SidebarActions,
-) {
+fn environment_picker(ui: &mut Ui, state: &mut NexusState, actions: &mut SidebarActions) {
     ui.horizontal(|ui| {
-        ui.add_space(10.0);
-        let active = state.workspace.active_environment().cloned();
-        let (name, color) = match &active {
-            Some(env) => (
-                env.name.clone(),
-                env.color
-                    .as_deref()
-                    .and_then(widgets::parse_color)
-                    .unwrap_or(pal.accent),
-            ),
-            None => ("Base Environment".to_owned(), pal.faint),
+        ui.add_space(size::CONTENT_INSET);
+        let base = EnvChoice {
+            id: None,
+            name: "Base Environment".into(),
         };
-        let w = ui.available_width() - 10.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), Sense::click());
-        let fill = if resp.hovered() {
-            pal.hover
-        } else {
-            color.gamma_multiply(0.10)
-        };
-        ui.painter().rect(
-            rect,
-            CornerRadius::same(6),
-            fill,
-            Stroke::new(1.0_f32, color.gamma_multiply(0.35)),
-            egui::StrokeKind::Inside,
+        let mut options = vec![base.clone()];
+        options.extend(state.workspace.environments.iter().map(|e| EnvChoice {
+            id: Some(e.id.clone()),
+            name: e.name.clone(),
+        }));
+        let mut choice = state
+            .workspace
+            .active_environment
+            .as_ref()
+            .and_then(|active| options.iter().find(|o| o.id.as_ref() == Some(active)))
+            .cloned()
+            .unwrap_or(base);
+        let before = choice.id.clone();
+        let width = ui.available_width() - size::CONTROL_HEIGHT - 12.0;
+        ui.add(
+            Dropdown::new("nexus-environment", &mut choice, options)
+                .label("Environment")
+                .width(width),
         );
-        ui.painter()
-            .circle_filled(pos2(rect.left() + 14.0, rect.center().y), 4.0, color);
-        ui.painter().text(
-            pos2(rect.left() + 26.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            &name,
-            FontId::proportional(13.0),
-            pal.text,
-        );
-        paint_icon(
-            ui.painter(),
-            Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(10.0, 10.0)),
-            Icon::Chevron(true),
-            pal.weak,
-        );
-        let resp = resp.on_hover_text("Switch environment (Ctrl+E to edit)");
-        egui::Popup::menu(&resp).width(w).show(|ui| {
-            if ui
-                .selectable_label(active.is_none(), "No environment (base only)")
-                .clicked()
-            {
-                state.workspace.active_environment = None;
-                state.touch();
-            }
-            let envs = state.workspace.environments.clone();
-            for env in envs {
-                let c = env
-                    .color
-                    .as_deref()
-                    .and_then(widgets::parse_color)
-                    .unwrap_or(pal.accent);
-                let selected = active.as_ref().is_some_and(|a| a.id == env.id);
-                ui.horizontal(|ui| {
-                    widgets::dot(ui, c);
-                    if ui.selectable_label(selected, &env.name).clicked() {
-                        state.workspace.active_environment = Some(env.id.clone());
-                        state.touch();
-                        ui.close();
-                    }
-                });
-            }
-            ui.separator();
-            if ui.button("Manage environments…").clicked() {
-                actions.open_environments = true;
-            }
-        });
+        if choice.id != before {
+            state.workspace.active_environment = choice.id;
+            state.touch();
+        }
+        if ui
+            .add(IconButton::new(Glyph::Settings, "Manage environments"))
+            .clicked()
+        {
+            actions.open_environments = true;
+        }
     });
 }
 
@@ -247,225 +276,350 @@ fn matches(item: &Item, filter: &str) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn tree_item(
-    ui: &mut Ui,
-    state: &mut NexusState,
-    local: &mut SidebarUi,
-    item: &Item,
-    depth: usize,
-    filter: &str,
-    pal: &Palette,
-    drop: &mut Option<(Id, Drop)>,
-) {
-    if !matches(item, filter) {
-        return;
+fn request_tag(request: &Request) -> (String, Tone) {
+    match request.protocol {
+        Protocol::Http => {
+            let method = request.method.to_string();
+            let tone = Tone::method(&method);
+            (method, tone)
+        }
+        Protocol::WebSocket => ("WS".into(), Tone::Accent),
+        Protocol::Sse => ("SSE".into(), Tone::Link),
+        Protocol::Grpc => ("gRPC".into(), Tone::Success),
     }
-    let id = item.id().clone();
-    let is_folder = matches!(item, Item::Folder(_));
-    let open = is_folder && (!filter.is_empty() || !state.collapsed.contains(&id));
-    let selected = state.selected.as_ref() == Some(&id);
-    let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::click_and_drag());
-    let row = rect.shrink2(vec2(6.0, 1.0));
-    if selected {
-        ui.painter()
-            .rect_filled(row, CornerRadius::same(6), pal.selection);
-    } else if resp.hovered() {
-        ui.painter()
-            .rect_filled(row, CornerRadius::same(6), pal.hover);
-    }
-    let x = row.left() + 8.0 + depth as f32 * INDENT;
-    let cy = row.center().y;
-    let renaming = local.renaming.as_ref().is_some_and(|(r, _, _)| r == &id);
+}
 
-    match item {
-        Item::Folder(f) => {
-            paint_icon(
-                ui.painter(),
-                Rect::from_center_size(pos2(x + 5.0, cy), vec2(10.0, 10.0)),
-                Icon::Chevron(open),
-                pal.weak,
-            );
-            paint_icon(
-                ui.painter(),
-                Rect::from_center_size(pos2(x + 22.0, cy), vec2(14.0, 14.0)),
-                Icon::Folder(open),
-                pal.weak,
-            );
-            if !renaming {
-                ui.painter().text(
-                    pos2(x + 36.0, cy),
-                    Align2::LEFT_CENTER,
-                    &f.name,
-                    FontId::proportional(13.0),
-                    pal.text,
-                );
+/// Flattens the visible part of the tree (expanded folders, or everything matching a filter).
+fn flatten(state: &NexusState, items: &[Item], filter: &str, depth: usize, rows: &mut Vec<Row>) {
+    for item in items.iter().filter(|i| matches(i, filter)) {
+        match item {
+            Item::Folder(f) => {
+                let open = !filter.is_empty() || !state.collapsed.contains(&f.id);
+                rows.push(Row {
+                    id: f.id.clone(),
+                    name: f.name.clone(),
+                    depth,
+                    folder: Some(open),
+                    tag: None,
+                });
+                if open {
+                    flatten(state, &f.children, filter, depth + 1, rows);
+                }
             }
-        }
-        Item::Request(r) => {
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                pos2(x - 6.0, cy - 8.0),
-                vec2(40.0, 16.0),
-            )));
-            widgets::request_label(&mut child, r, 36.0);
-            if !renaming {
-                let max_w = row.right() - (x + 40.0) - 6.0;
-                let name = elide(ui, &r.name, max_w);
-                ui.painter().text(
-                    pos2(x + 40.0, cy),
-                    Align2::LEFT_CENTER,
-                    name,
-                    FontId::proportional(13.0),
-                    if selected { pal.strong } else { pal.text },
-                );
-            }
-        }
-    }
-
-    if let Some((_, buffer, focus)) = local.renaming.as_mut().filter(|(r, _, _)| r == &id) {
-        let edit_rect = Rect::from_min_max(
-            pos2(x + if is_folder { 32.0 } else { 36.0 }, cy - 10.0),
-            pos2(row.right() - 4.0, cy + 10.0),
-        );
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit_rect));
-        let edit = child.add(egui::TextEdit::singleline(buffer).desired_width(edit_rect.width()));
-        if *focus {
-            edit.request_focus();
-            *focus = false;
-        }
-        let enter = child.input(|i| i.key_pressed(egui::Key::Enter));
-        let escape = child.input(|i| i.key_pressed(egui::Key::Escape));
-        if escape {
-            local.renaming = None;
-        } else if edit.lost_focus() || enter {
-            let name = buffer.clone();
-            local.renaming = None;
-            state.rename(&id, &name);
-        }
-    }
-
-    // Interaction
-    if resp.clicked() {
-        if is_folder {
-            if !state.collapsed.remove(&id) {
-                state.collapsed.insert(id.clone());
-            }
-        } else {
-            state.select(id.clone());
-        }
-    }
-    if resp.double_clicked() {
-        local.renaming = Some((id.clone(), item.name().to_owned(), true));
-    }
-    resp.dnd_set_drag_payload(id.clone());
-    if let Some(payload) = resp.dnd_hover_payload::<Id>()
-        && *payload != id
-    {
-        let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
-        let rel = (pointer.y - rect.top()) / rect.height();
-        let target = if is_folder && (0.3..0.7).contains(&rel) {
-            Drop::Into(id.clone())
-        } else if rel < 0.5 {
-            Drop::Before(id.clone())
-        } else {
-            Drop::After(id.clone())
-        };
-        match &target {
-            Drop::Into(_) => {
-                ui.painter().rect_stroke(
-                    row,
-                    CornerRadius::same(6),
-                    Stroke::new(1.5_f32, pal.accent),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            Drop::Before(_) => {
-                ui.painter().hline(
-                    row.x_range(),
-                    rect.top() + 1.0,
-                    Stroke::new(2.0_f32, pal.accent),
-                );
-            }
-            Drop::After(_) => {
-                ui.painter().hline(
-                    row.x_range(),
-                    rect.bottom() - 1.0,
-                    Stroke::new(2.0_f32, pal.accent),
-                );
-            }
-            Drop::End => {}
-        }
-        if let Some(released) = resp.dnd_release_payload::<Id>() {
-            *drop = Some(((*released).clone(), target));
-        }
-    }
-    resp.context_menu(|ui| {
-        ui.set_min_width(180.0);
-        if is_folder {
-            if ui.button("New Request").clicked() {
-                state.new_request(Some(&id));
-            }
-            if ui.button("New Folder").clicked() {
-                let new = state.new_folder(Some(&id));
-                local.renaming = Some((new, "New Folder".into(), true));
-            }
-            if ui.button("Run folder…").clicked() {
-                local.run_request = Some(id.clone());
-            }
-            ui.separator();
-        } else if ui.button("Send").clicked() {
-            state.select(id.clone());
-            state.send(&id);
-        }
-        if ui.button("Rename").clicked() {
-            local.renaming = Some((id.clone(), item.name().to_owned(), true));
-        }
-        if ui.button("Duplicate").clicked()
-            && let Some(copy) = state.duplicate(&id)
-            && !is_folder
-        {
-            state.select(copy);
-        }
-        ui.separator();
-        if ui
-            .button(RichText::new("Delete").color(pal.error))
-            .clicked()
-        {
-            state.delete(&id);
-        }
-    });
-
-    if let Item::Folder(f) = item
-        && open
-    {
-        for child in &f.children {
-            tree_item(ui, state, local, child, depth + 1, filter, pal, drop);
+            Item::Request(r) => rows.push(Row {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                depth,
+                folder: None,
+                tag: Some(request_tag(r)),
+            }),
         }
     }
 }
 
-fn elide(ui: &Ui, text: &str, max_w: f32) -> String {
-    let font = FontId::proportional(13.0);
-    let width = |s: &str| {
-        ui.fonts_mut(|f| {
-            f.layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE)
-                .size()
-                .x
-        })
-    };
-    if width(text) <= max_w {
-        return text.to_owned();
+fn tree(ui: &mut Ui, state: &mut NexusState, local: &mut SidebarUi, actions: &mut SidebarActions) {
+    if state.selected != local.last_selected {
+        local.last_selected = state.selected.clone();
+        local.cursor = state.selected.clone();
     }
-    let mut chars: Vec<char> = text.chars().collect();
-    while !chars.is_empty() {
-        chars.pop();
-        let candidate: String = chars.iter().collect::<String>() + "…";
-        if width(&candidate) <= max_w {
-            return candidate;
+    if state.workspace.items.is_empty() {
+        if EmptyState::new("No requests yet")
+            .icon(Glyph::Send)
+            .hint("Press Ctrl+N or use + to add one.")
+            .action("New request")
+            .show(ui)
+            .clicked()
+        {
+            state.new_request(None);
+        }
+        return;
+    }
+    let filter = state.filter.trim().to_lowercase();
+    let mut rows = Vec::new();
+    flatten(state, &state.workspace.items, &filter, 0, &mut rows);
+    if rows.is_empty() {
+        EmptyState::new("No matches")
+            .icon(Glyph::Search)
+            .hint("Nothing in this workspace matches the filter.")
+            .show(ui);
+        return;
+    }
+
+    let dragging = egui::DragAndDrop::has_payload_of_type::<Id>(ui.ctx());
+    let end_zone = if dragging {
+        size::ROW_HEIGHT + 6.0
+    } else {
+        0.0
+    };
+    let height = (ui.available_height() - end_zone).max(size::ROW_HEIGHT * 3.0);
+    let mut selected = local
+        .cursor
+        .as_ref()
+        .and_then(|id| rows.iter().position(|r| &r.id == id));
+
+    let sink = RefCell::new(Sink::default());
+    let rename_rect: Cell<Option<Rect>> = Cell::new(None);
+    let renaming_id = local.renaming.as_ref().map(|(id, _, _)| id.clone());
+    let out = VirtualList::new("nexus-tree", rows.len(), &mut selected)
+        .name("Requests")
+        .height(height)
+        .show(ui, |i| {
+            let row = &rows[i];
+            let id = row.id.clone();
+            let mut list_row = ListRow::new(row.name.as_str())
+                .depth(row.depth)
+                .expanded(row.folder);
+            match row.folder {
+                Some(open) => {
+                    list_row = list_row.icon(if open {
+                        Glyph::FolderOpen
+                    } else {
+                        Glyph::Folder
+                    });
+                }
+                None => {
+                    if let Some((text, tone)) = &row.tag {
+                        // TODO(kit Tone::method): the tag sits in the trailing slot because
+                        // ListRow has no leading slot (see "Kit gaps" in the PR).
+                        let text = text.clone();
+                        let tone = *tone;
+                        list_row = list_row.trailing(Slot::ui_width(44.0, move |ui| {
+                            ui.add(Tag::new(text).tone(tone));
+                        }));
+                    }
+                }
+            }
+            let is_folder = row.folder.is_some();
+            let menu_id = id.clone();
+            let sink_ref = &sink;
+            let rect_cell = &rename_rect;
+            let is_renaming = renaming_id.as_ref() == Some(&id);
+            let target = if is_folder {
+                Drop::Into(id.clone())
+            } else {
+                Drop::After(id.clone())
+            };
+            list_row
+                .with(move |_: &mut Ui, response: Response| {
+                    if is_renaming {
+                        rect_cell.set(Some(response.rect));
+                    }
+                    response
+                })
+                .with(ContextMenu::new(move |ui| {
+                    let pick = |ui: &mut Ui, item: MenuItem, action: MenuAction| {
+                        if ui.add(item).clicked() {
+                            sink_ref.borrow_mut().menu = Some((menu_id.clone(), action));
+                            ui.close();
+                        }
+                    };
+                    if is_folder {
+                        pick(
+                            ui,
+                            MenuItem::new("New Request").icon(Glyph::NewFile),
+                            MenuAction::NewRequest,
+                        );
+                        pick(
+                            ui,
+                            MenuItem::new("New Folder").icon(Glyph::NewFolder),
+                            MenuAction::NewFolder,
+                        );
+                        pick(
+                            ui,
+                            MenuItem::new("Run folder…").icon(Glyph::Run),
+                            MenuAction::RunFolder,
+                        );
+                        ui.add(MenuSeparator);
+                    } else {
+                        pick(
+                            ui,
+                            MenuItem::new("Send").icon(Glyph::Send),
+                            MenuAction::Send,
+                        );
+                    }
+                    pick(
+                        ui,
+                        MenuItem::new("Rename").icon(Glyph::Edit).shortcut("F2"),
+                        MenuAction::Rename,
+                    );
+                    pick(
+                        ui,
+                        MenuItem::new("Duplicate").icon(Glyph::Copy),
+                        MenuAction::Duplicate,
+                    );
+                    ui.add(MenuSeparator);
+                    pick(
+                        ui,
+                        MenuItem::new("Delete").icon(Glyph::Delete),
+                        MenuAction::Delete,
+                    );
+                }))
+                .with(DragSource(id))
+                .with(DropOn(sink_ref, target))
+                .with(|_: &mut Ui, response: Response| {
+                    // Rows are not links: the arrow stays while hovering, even though the
+                    // drag source offers the hand.
+                    if !response.dragged() {
+                        cursor::on_hover(&response, egui::CursorIcon::Default);
+                    }
+                    response
+                })
+        });
+
+    if dragging {
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), size::ROW_HEIGHT + 6.0),
+            egui::Sense::hover(),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.add_space(3.0);
+            ui.add_enabled(
+                false,
+                egui::Label::new(
+                    egui::RichText::new("Drop here to move to the top level")
+                        .color(Theme::colors(ui.ctx()).text_secondary),
+                ),
+            );
+        });
+        DropOn(&sink, Drop::End).attach(ui, response);
+    }
+
+    // Keyboard cursor follows the list's selection; requests open in the editor.
+    if out.selection_changed
+        && let Some(row) = selected.and_then(|i| rows.get(i))
+    {
+        local.cursor = Some(row.id.clone());
+        if row.folder.is_none() {
+            state.select(row.id.clone());
+            local.last_selected = state.selected.clone();
         }
     }
-    "…".into()
+    if let Some(index) = out.toggled.or(out.activated)
+        && let Some(row) = rows.get(index)
+        && row.folder.is_some()
+    {
+        toggle_folder(state, &row.id);
+    }
+    // Left/Right on a focused tree collapse and expand the folder under the cursor.
+    if out.response.has_focus()
+        && filter.is_empty()
+        && let Some(row) = selected.and_then(|i| rows.get(i))
+    {
+        let (left, right, rename) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowLeft),
+                i.consume_key(Modifiers::NONE, Key::ArrowRight),
+                i.consume_key(Modifiers::NONE, Key::F2),
+            )
+        });
+        match row.folder {
+            Some(true) if left => toggle_folder(state, &row.id),
+            Some(false) if right => toggle_folder(state, &row.id),
+            _ => {}
+        }
+        if rename {
+            local.renaming = Some((row.id.clone(), row.name.clone(), true));
+        }
+    }
+
+    inline_rename(ui, state, local, &rows, rename_rect.get());
+
+    let Sink { menu, drop } = sink.into_inner();
+    if let Some((dragged, target)) = drop {
+        apply_drop(state, &dragged, target);
+    }
+    if let Some((id, action)) = menu {
+        run_menu_action(state, local, actions, &id, action);
+    }
+}
+
+fn toggle_folder(state: &mut NexusState, id: &Id) {
+    if !state.collapsed.remove(id) {
+        state.collapsed.insert(id.clone());
+    }
+}
+
+/// A text field over the row being renamed: Enter or leaving the field commits, Escape cancels.
+fn inline_rename(
+    ui: &mut Ui,
+    state: &mut NexusState,
+    local: &mut SidebarUi,
+    rows: &[Row],
+    rect: Option<Rect>,
+) {
+    let Some((id, buffer, focus)) = local.renaming.as_mut() else {
+        return;
+    };
+    let Some(row) = rows.iter().find(|r| &r.id == id) else {
+        local.renaming = None;
+        return;
+    };
+    let Some(rect) = rect else {
+        // Scrolled out of view (the list only lays out visible rows): cancel.
+        local.renaming = None;
+        return;
+    };
+    let left = rect.left() + size::indent(row.depth) + size::ICON + 8.0;
+    let field = Rect::from_min_max(
+        pos2(left, rect.top()),
+        pos2(rect.right() - 4.0, rect.bottom()),
+    );
+    let escape = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let edit = ui.put(
+        field,
+        TextField::new(buffer).label("Name").width(field.width()),
+    );
+    if *focus {
+        edit.request_focus();
+        *focus = false;
+    }
+    let enter = edit.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+    if escape {
+        local.renaming = None;
+    } else if enter || edit.lost_focus() {
+        let name = buffer.clone();
+        let id = id.clone();
+        local.renaming = None;
+        state.rename(&id, &name);
+    }
+}
+
+fn run_menu_action(
+    state: &mut NexusState,
+    local: &mut SidebarUi,
+    actions: &mut SidebarActions,
+    id: &Id,
+    action: MenuAction,
+) {
+    let is_folder = matches!(state.workspace.find_item(id), Some(Item::Folder(_)));
+    let name = state
+        .workspace
+        .find_item(id)
+        .map(|item| item.name().to_owned())
+        .unwrap_or_default();
+    match action {
+        MenuAction::NewRequest => {
+            state.new_request(Some(id));
+        }
+        MenuAction::NewFolder => {
+            let new = state.new_folder(Some(id));
+            local.renaming = Some((new, "New Folder".into(), true));
+        }
+        MenuAction::RunFolder => actions.run = Some(Some(id.clone())),
+        MenuAction::Send => {
+            state.select(id.clone());
+            state.send(id);
+        }
+        MenuAction::Rename => local.renaming = Some((id.clone(), name, true)),
+        MenuAction::Duplicate => {
+            if let Some(copy) = state.duplicate(id)
+                && !is_folder
+            {
+                state.select(copy);
+            }
+        }
+        MenuAction::Delete => state.delete(id),
+    }
 }
 
 fn apply_drop(state: &mut NexusState, dragged: &Id, target: Drop) {
@@ -487,6 +641,9 @@ fn apply_drop(state: &mut NexusState, dragged: &Id, target: Drop) {
     };
     match target {
         Drop::Into(folder) => {
+            if &folder == dragged {
+                return;
+            }
             let end = match state.workspace.find_item(&folder) {
                 Some(Item::Folder(f)) => f.children.len(),
                 _ => return,
@@ -497,12 +654,10 @@ fn apply_drop(state: &mut NexusState, dragged: &Id, target: Drop) {
             let len = state.workspace.items.len();
             state.move_item(dragged, None, len);
         }
-        Drop::Before(t) => {
-            if let Some((parent, index)) = locate(state, &t) {
-                state.move_item(dragged, parent.as_ref(), index);
-            }
-        }
         Drop::After(t) => {
+            if &t == dragged {
+                return;
+            }
             if let Some((parent, index)) = locate(state, &t) {
                 state.move_item(dragged, parent.as_ref(), index + 1);
             }
@@ -521,14 +676,14 @@ mod tests {
         let a = s.new_request(None);
         let b = s.new_request(None);
         let f = s.new_folder(None);
-        apply_drop(&mut s, &b, Drop::Before(a.clone()));
-        assert_eq!(s.workspace.items[0].id(), &b);
+        apply_drop(&mut s, &b, Drop::After(f.clone()));
+        assert_eq!(s.workspace.items.last().unwrap().id(), &b);
         apply_drop(&mut s, &a, Drop::Into(f.clone()));
         let Some(Item::Folder(folder)) = s.workspace.find_item(&f) else {
             panic!()
         };
         assert_eq!(folder.children[0].id(), &a);
-        apply_drop(&mut s, &b, Drop::After(f.clone()));
-        assert_eq!(s.workspace.items.last().unwrap().id(), &b);
+        apply_drop(&mut s, &a, Drop::End);
+        assert_eq!(s.workspace.items.last().unwrap().id(), &a);
     }
 }

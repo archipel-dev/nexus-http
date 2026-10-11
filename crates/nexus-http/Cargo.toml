@@ -17,6 +17,7 @@ url.workspace = true
 
 [dev-dependencies]
 archipel-sdk = { workspace = true, features = ["testing"] }
+archipel-kit = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [lints]
