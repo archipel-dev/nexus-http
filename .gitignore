@@ -1,0 +1,6 @@
+/target
+**/target
+*.old.png
+*.new.png
+*.diff.png
+/dist
