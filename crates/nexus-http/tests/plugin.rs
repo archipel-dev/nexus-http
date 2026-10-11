@@ -6,10 +6,9 @@ use archipel_sdk::testing::{Fixture, RecordingHost, audit, view_harness};
 use nexus_http::plugin::{FILE_EXTENSIONS, ID, NexusHttpPlugin, OPEN, VIEW};
 
 fn host_in(dir: &std::path::Path) -> RecordingHost {
-    RecordingHost {
-        project: Some(dir.to_path_buf()),
-        ..RecordingHost::new(ID)
-    }
+    let mut host = RecordingHost::new(ID);
+    host.project = Some(dir.to_path_buf());
+    host
 }
 
 #[test]
