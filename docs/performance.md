@@ -10,7 +10,7 @@ explains why.
 | Frame time | p99 < 16 ms | CPU time of one `update` plus tessellation over the scripted interactions. |
 | Idle CPU | 1 % | Process CPU time over 10 s without input, as a share of one core. |
 | Idle repaints | 2 frames | Frames the window paints during those 10 s; guards against continuous repainting. |
-| Peak memory | 150 MB | `VmHWM` after the interaction script, with software rendering. |
+| Peak memory | 200 MB | `VmHWM` after the interaction script, with software rendering (lavapipe; real-GPU target in #45). |
 
 ## Run it locally
 
