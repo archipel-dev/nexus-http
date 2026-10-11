@@ -1,0 +1,25 @@
+[package]
+name = "nexus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Nexus: the standalone desktop API client of the Archipel suite."
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+# eframe is built without default features; pick the GPU backends explicitly.
+wgpu.workspace = true
+nexus-http.workspace = true
+nexus-http-core.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
+tungstenite.workspace = true
+
+[lints]
+workspace = true

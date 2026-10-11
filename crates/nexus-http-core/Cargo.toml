@@ -1,0 +1,47 @@
+[package]
+name = "nexus-http-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless engine of the Nexus HTTP API client: model, storage, templating, auth and execution."
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22"
+cookie = "0.18"
+hmac = "0.12"
+md-5 = "0.10"
+prost = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "0.10"
+shell-words = "1.1"
+yaml_serde = "0.10"
+rand = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "http2", "socks", "gzip", "brotli", "deflate", "multipart", "charset"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_json_path = "0.7"
+sha2 = "0.10"
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt", "time", "sync", "net"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "tls-ring", "tls-native-roots"] }
+tonic-reflection = { version = "0.14", default-features = false }
+tungstenite = "0.30"
+url.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower-service = "0.3"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-reflection = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tempfile.workspace = true
+tiny_http.workspace = true
+tungstenite.workspace = true
+
+[lints]
+workspace = true
