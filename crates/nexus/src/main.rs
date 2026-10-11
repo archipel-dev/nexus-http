@@ -29,6 +29,7 @@ fn main() -> eframe::Result {
         let sse_port = demo_sse_server();
         let dir = std::env::temp_dir().join(format!("nexus-demo-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("invoice.pdf"), b"%PDF-1.4\n% demo invoice\n");
         let mut state = NexusState::open(&dir);
         state.replace_workspace(demo_workspace(port, ws_port, sse_port));
         NexusApp::with_state(state)
@@ -367,6 +368,7 @@ fn demo_server() -> u16 {
                     json!({"sku": "KB-001", "name": "Mechanical Keyboard", "price": 129.0}),
                 ),
                 ("POST", "/v1/products") => (201, serde_json::from_str(&body).unwrap_or(json!({}))),
+                ("POST", p) if p.ends_with("/invoice") => (201, json!({"received": true})),
                 ("PATCH", _) => (200, json!({"sku": "KB-042", "price": 169.0})),
                 ("DELETE", _) => (204, json!(null)),
                 ("POST", "/graphql") if body.contains("__schema") => (200, demo_schema()),
