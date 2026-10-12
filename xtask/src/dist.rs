@@ -381,16 +381,22 @@ pub fn wix_source() -> String {
             <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="{APP_NAME}" WorkingDirectory="INSTALLFOLDER" Advertise="yes" />
           </File>
         </Component>
-        <Component Id="Documents">
-          <File Id="Readme" Source="$(Stage)\README.md" />
-          <File Id="LicenseApache" Source="$(Stage)\LICENSE-APACHE" />
-          <File Id="LicenseMit" Source="$(Stage)\LICENSE-MIT" />
+        <Component Id="Readme">
+          <File Id="Readme" Source="$(Stage)\README.md" KeyPath="yes" />
+        </Component>
+        <Component Id="LicenseApache">
+          <File Id="LicenseApache" Source="$(Stage)\LICENSE-APACHE" KeyPath="yes" />
+        </Component>
+        <Component Id="LicenseMit">
+          <File Id="LicenseMit" Source="$(Stage)\LICENSE-MIT" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>
     <Feature Id="Main" Title="{APP_NAME}" Level="1">
       <ComponentRef Id="MainExecutable" />
-      <ComponentRef Id="Documents" />
+      <ComponentRef Id="Readme" />
+      <ComponentRef Id="LicenseApache" />
+      <ComponentRef Id="LicenseMit" />
     </Feature>
   </Package>
 </Wix>
@@ -823,6 +829,18 @@ mod tests {
         assert!(wxs.contains("Source=\"$(Stage)\\nexus.exe\""));
         assert!(wxs.contains("<Shortcut"));
         assert!(wxs.contains("<MajorUpgrade"));
+        // WiX derives component GUIDs only for single-file components here: none of
+        // the files carries a version resource (error WIX0367 otherwise).
+        assert_eq!(
+            wxs.matches("<Component ").count(),
+            wxs.matches("<File ").count(),
+            "one file per component"
+        );
+        assert_eq!(
+            wxs.matches("<Component ").count(),
+            wxs.matches("<ComponentRef ").count(),
+            "every component is in the feature"
+        );
     }
 
     #[test]
