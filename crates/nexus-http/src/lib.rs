@@ -514,11 +514,14 @@ fn welcome(ui: &mut Ui) {
 
 fn toast(ctx: &egui::Context, state: &mut NexusState) {
     const LIFETIME: f32 = 4.0;
+    // Timers wake a little early: a notice this close to its end goes on that wake instead
+    // of asking for one more frame.
+    const SLACK: f32 = 0.05;
     let Some((message, at)) = &state.notice else {
         return;
     };
     let age = at.elapsed().as_secs_f32();
-    if age > LIFETIME {
+    if age >= LIFETIME - SLACK {
         state.notice = None;
         return;
     }
