@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "nexus"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "eframe",
  "nexus-http",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-http"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "archipel-kit",
  "archipel-sdk",
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-http-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "cookie",
@@ -5969,7 +5969,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "flate2",
