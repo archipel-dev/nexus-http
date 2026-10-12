@@ -27,10 +27,14 @@ use views::overlays::{Overlay, OverlayUi};
 
 /// Narrowest pane the views are drawn in.
 const MIN_CONTENT: f32 = 100.0;
+/// Smallest standalone window: the toolbar's widgets and the request island still fit.
+const MIN_WINDOW_WIDTH: f32 = 800.0;
+const MIN_WINDOW_HEIGHT: f32 = 500.0;
 
 pub struct NexusApp {
     pub state: NexusState,
     sidebar: views::sidebar::SidebarUi,
+    toolbar: views::toolbar::ToolbarUi,
     response: views::response::ResponseUi,
     overlays: OverlayUi,
     runner: views::runner::RunnerUi,
@@ -55,6 +59,15 @@ impl NexusApp {
         archipel_kit::install(ctx, theme);
     }
 
+    /// The standalone window's viewport: `builder` with the toolbar's window chrome (on macOS
+    /// the toolbar replaces the title bar and holds the traffic lights) and a minimum size that
+    /// keeps the toolbar's widgets and the islands usable. Call
+    /// `views::toolbar::CHROME.align_native_controls(title, ctx)` on every frame.
+    pub fn viewport(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+        views::toolbar::CHROME
+            .viewport(builder.with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT]))
+    }
+
     /// Opens (or creates) the workspace stored under `dir/.nexus`.
     pub fn open(dir: &Path) -> Self {
         Self::with_state(NexusState::open(dir))
@@ -70,6 +83,7 @@ impl NexusApp {
             layout,
             state,
             sidebar: Default::default(),
+            toolbar: Default::default(),
             response: Default::default(),
             overlays: Default::default(),
             runner: Default::default(),
@@ -228,6 +242,7 @@ impl NexusApp {
     /// Renders the client into `ui`, filling it: the islands, without a status bar. For a
     /// plugin tool window or editor tab.
     pub fn ui(&mut self, ui: &mut Ui) {
+        self.sidebar.environment_in_toolbar = false;
         self.frame(ui);
         let tabs = self.response_tabs();
         let (mut places, layout) = self.places();
@@ -238,18 +253,23 @@ impl NexusApp {
         self.apply(ui, outcome);
     }
 
-    /// Renders the client as a whole window: the islands and the status bar. For the
-    /// standalone app.
+    /// Renders the client as a whole window: the main toolbar (workspace and environment
+    /// widgets, Go to request), the islands and the status bar. For the standalone app, whose
+    /// viewport uses [`views::toolbar::CHROME`] (see [`Self::viewport`]).
     pub fn window(&mut self, ctx: &egui::Context) {
+        self.sidebar.environment_in_toolbar = true;
         // Background work and shortcuts, on a layer that draws nothing.
         egui::Area::new(egui::Id::new("nexus-frame"))
             .order(egui::Order::Background)
             .show(ctx, |ui| self.frame(ui));
         let tabs = self.response_tabs();
         let outcome = {
+            let color = views::toolbar::workspace_color(&self.state);
             let (mut places, layout) = self.places();
             let title = places.title.clone();
             Self::workbench(layout, &title, tabs)
+                .project_color(color)
+                .with_toolbar(views::toolbar::CHROME)
                 .with_status()
                 .show_with(ctx, &mut places, Places::fill);
             places.finish()
@@ -324,6 +344,7 @@ impl NexusApp {
         let Self {
             state,
             sidebar,
+            toolbar,
             response,
             runner,
             runner_open,
@@ -334,12 +355,14 @@ impl NexusApp {
             Places {
                 state,
                 sidebar,
+                toolbar,
                 response,
                 runner,
                 runner_open: *runner_open,
                 selected,
                 title,
                 side_actions: Default::default(),
+                toolbar_actions: Default::default(),
                 req_actions: Default::default(),
                 close_runner: false,
             },
@@ -351,6 +374,7 @@ impl NexusApp {
     fn apply(&mut self, ui: &mut Ui, outcome: Outcome) {
         let Outcome {
             mut side_actions,
+            toolbar_actions,
             req_actions,
             close_runner,
         } = outcome;
@@ -382,6 +406,26 @@ impl NexusApp {
         }
         if side_actions.export {
             self.overlays.open(Overlay::Export);
+        }
+        let views::toolbar::ToolbarActions {
+            open_import,
+            export,
+            run_collection,
+            open_environments,
+            go_to_request,
+        } = toolbar_actions;
+        if run_collection {
+            self.open_runner(None);
+        }
+        for (asked, overlay) in [
+            (open_import, Overlay::Import),
+            (export, Overlay::Export),
+            (open_environments, Overlay::Environments),
+            (go_to_request, Overlay::Switcher),
+        ] {
+            if asked {
+                self.overlays.open(overlay);
+            }
         }
         if req_actions.send {
             self.send_selected();
@@ -419,12 +463,14 @@ impl NexusApp {
 struct Places<'a> {
     state: &'a mut NexusState,
     sidebar: &'a mut views::sidebar::SidebarUi,
+    toolbar: &'a mut views::toolbar::ToolbarUi,
     response: &'a mut views::response::ResponseUi,
     runner: &'a mut views::runner::RunnerUi,
     runner_open: bool,
     selected: Option<nexus_http_core::model::Id>,
     title: String,
     side_actions: views::sidebar::SidebarActions,
+    toolbar_actions: views::toolbar::ToolbarActions,
     req_actions: views::request::RequestActions,
     close_runner: bool,
 }
@@ -432,6 +478,7 @@ struct Places<'a> {
 /// What the islands asked the app to do.
 struct Outcome {
     side_actions: views::sidebar::SidebarActions,
+    toolbar_actions: views::toolbar::ToolbarActions,
     req_actions: views::request::RequestActions,
     close_runner: bool,
 }
@@ -468,6 +515,12 @@ impl Places<'_> {
                         .show(ui);
                 }
             },
+            WorkbenchPlace::Toolbar => views::toolbar::show(
+                ui,
+                places.state,
+                places.toolbar,
+                &mut places.toolbar_actions,
+            ),
             WorkbenchPlace::Status => status_bar(ui, places.state),
             _ => {}
         }
@@ -476,6 +529,7 @@ impl Places<'_> {
     fn finish(self) -> Outcome {
         Outcome {
             side_actions: self.side_actions,
+            toolbar_actions: self.toolbar_actions,
             req_actions: self.req_actions,
             close_runner: self.close_runner,
         }
@@ -484,10 +538,7 @@ impl Places<'_> {
 
 /// The status bar: the environment, what is being sent, the size of the workspace.
 fn status_bar(ui: &mut Ui, state: &NexusState) {
-    let env = state
-        .workspace
-        .active_environment()
-        .map_or("Base Environment".to_owned(), |e| e.name.clone());
+    let env = views::toolbar::environment_name(state);
     ui.add(StatusBarItem::new(env).icon(Glyph::Globe));
     if state.is_sending() {
         ui.add(StatusBarItem::new("Sending…"));
