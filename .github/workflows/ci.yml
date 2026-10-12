@@ -71,14 +71,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build nexus
-        shell: bash
+      # The same packaging the release runs, so a broken installer fails the PR
+      # instead of the tagged release.
+      - name: Install WiX Toolset
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          if [ -d crates/nexus ]; then
-            cargo build -p nexus
-          else
-            echo "crates/nexus does not exist yet; nothing to build"
-          fi
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+      - name: Build nexus and its installer
+        shell: bash
+        run: cargo xtask dist
 
   perf:
     name: perf budgets
