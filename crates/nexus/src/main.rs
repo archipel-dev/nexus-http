@@ -25,6 +25,9 @@ use nexus_http_core::model::*;
 use serde_json::json;
 use std::path::PathBuf;
 
+/// The window's title: names the window for the native toolbar integration too.
+const TITLE: &str = "Nexus";
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let demo = args.iter().any(|a| a == "--demo");
@@ -48,13 +51,15 @@ fn main() -> eframe::Result {
     apply_demo_env(&mut app);
     let light = std::env::var_os("NEXUS_LIGHT").is_some();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Nexus")
-            .with_inner_size([1280.0, 800.0]),
+        viewport: NexusApp::viewport(
+            egui::ViewportBuilder::default()
+                .with_title(TITLE)
+                .with_inner_size([1280.0, 800.0]),
+        ),
         ..Default::default()
     };
     eframe::run_native(
-        "Nexus",
+        TITLE,
         options,
         Box::new(move |cc| {
             NexusApp::install(&cc.egui_ctx, !light);
@@ -120,6 +125,9 @@ impl eframe::App for Host {
             self.app.state.send_stream_message(&id);
             ctx.request_repaint();
         }
+        // On macOS: the traffic lights centered in the toolbar, the window's backing in the
+        // theme's frame color (again after a resize relayout).
+        nexus_http::views::toolbar::CHROME.align_native_controls(TITLE, ctx);
         self.app.window(ctx);
     }
 }

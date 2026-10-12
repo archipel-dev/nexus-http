@@ -374,6 +374,14 @@ impl NexusState {
         self.touch();
     }
 
+    /// Makes `id` the active environment (`None`: only the base environment) and saves it.
+    pub fn set_active_environment(&mut self, id: Option<Id>) {
+        if self.workspace.active_environment != id {
+            self.workspace.active_environment = id;
+            self.touch();
+        }
+    }
+
     pub fn rename(&mut self, id: &Id, name: &str) {
         let name = name.trim();
         if name.is_empty() {

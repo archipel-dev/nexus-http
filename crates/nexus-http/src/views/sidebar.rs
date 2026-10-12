@@ -30,6 +30,8 @@ pub struct SidebarUi {
     last_selected: Option<Id>,
     workspace_menu: bool,
     add_menu: bool,
+    /// The window's toolbar shows the environment (standalone app): the tool window doesn't.
+    pub environment_in_toolbar: bool,
 }
 
 #[derive(Default)]
@@ -198,7 +200,9 @@ pub fn show(
     actions: &mut SidebarActions,
 ) {
     ui.spacing_mut().item_spacing.y = size::TOOLBAR_GAP;
-    environment_picker(ui, state, actions);
+    if !local.environment_in_toolbar {
+        environment_picker(ui, state, actions);
+    }
     ui.horizontal(|ui| {
         ui.add_space(size::CONTENT_INSET);
         let width = ui.available_width() - size::CONTENT_INSET;
@@ -222,7 +226,7 @@ fn environment_picker(ui: &mut Ui, state: &mut NexusState, actions: &mut Sidebar
         ui.add_space(size::CONTENT_INSET);
         let base = EnvChoice {
             id: None,
-            name: "Base Environment".into(),
+            name: crate::views::toolbar::BASE_ENVIRONMENT.into(),
         };
         let mut options = vec![base.clone()];
         options.extend(state.workspace.environments.iter().map(|e| EnvChoice {
@@ -246,8 +250,7 @@ fn environment_picker(ui: &mut Ui, state: &mut NexusState, actions: &mut Sidebar
                 .width(width),
         );
         if choice.id != before {
-            state.workspace.active_environment = choice.id;
-            state.touch();
+            state.set_active_environment(choice.id);
         }
         if ui
             .add(IconButton::new(Glyph::Settings, "Manage environments"))
