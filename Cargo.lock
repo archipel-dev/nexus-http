@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "archipel-icons"
 version = "0.1.0"
-source = "git+https://www.github.com/archipel-dev/kit?branch=claude%2Fkit-lib-android-studio-ui-jleosm#09ea9ac40db5134241c0748b6231158b934a8391"
+source = "git+https://github.com/archipel-dev/kit?branch=main#e692ccdc64c69b916a5b6a7973d87c62bd675884"
 dependencies = [
  "egui",
 ]
@@ -291,7 +291,7 @@ dependencies = [
 [[package]]
 name = "archipel-kit"
 version = "0.1.0"
-source = "git+https://www.github.com/archipel-dev/kit?branch=claude%2Fkit-lib-android-studio-ui-jleosm#09ea9ac40db5134241c0748b6231158b934a8391"
+source = "git+https://github.com/archipel-dev/kit?branch=main#e692ccdc64c69b916a5b6a7973d87c62bd675884"
 dependencies = [
  "archipel-icons",
  "egui",
@@ -920,7 +920,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
 dependencies = [
- "unicode-width 0.2.2",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]

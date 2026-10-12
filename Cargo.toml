@@ -31,7 +31,3 @@ unsafe_code = "forbid"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-# Until archipel-dev/kit#32 is merged: build against its branch. Remove after the merge.
-[patch."https://github.com/archipel-dev/kit"]
-archipel-kit = { git = "https://www.github.com/archipel-dev/kit", branch = "claude/kit-lib-android-studio-ui-jleosm" }
