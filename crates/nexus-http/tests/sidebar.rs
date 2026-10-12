@@ -60,10 +60,19 @@ fn screen() -> Screen {
 }
 
 fn harness(theme: Theme) -> Harness<'static, Screen> {
-    let mut harness = testing::harness_state(theme, screen(), |ui, s| {
-        sidebar::show(ui, &mut s.state, &mut s.local, &mut s.actions);
-    });
-    harness.set_size(egui::vec2(300.0, 720.0));
+    // As in the tool window: the header buttons, then the body.
+    let mut harness =
+        testing::harness_state_sized(theme, egui::vec2(300.0, 720.0), screen(), |ui, s| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(
+                    ui.available_width(),
+                    archipel_kit::tokens::size::HEADER_HEIGHT,
+                ),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| sidebar::header_actions(ui, &mut s.state, &mut s.local, &mut s.actions),
+            );
+            sidebar::show(ui, &mut s.state, &mut s.local, &mut s.actions);
+        });
     harness.run();
     harness
 }

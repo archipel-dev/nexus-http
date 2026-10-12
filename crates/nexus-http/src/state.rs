@@ -897,6 +897,34 @@ impl NexusState {
         self.store.as_ref().map(Store::root)
     }
 
+    /// Saves `response` (of request `id`) next to the workspace and says where.
+    pub fn save_response_body(&mut self, id: &Id, response: &nexus_http_core::Response) {
+        let name = self
+            .workspace
+            .find_request(id)
+            .map(|(_, r)| r.name.clone())
+            .unwrap_or_default();
+        let path = self.base_dir().join(response.file_name(&name));
+        match std::fs::write(&path, &response.body) {
+            Ok(()) => self.notify(format!("Saved {}", path.display())),
+            Err(e) => self.notify(format!("Could not save the response: {e}")),
+        }
+    }
+
+    /// The text of the file at `path`, to import.
+    pub fn read_import_file(path: &str) -> Result<String, String> {
+        std::fs::read_to_string(path.trim())
+            .map_err(|e| format!("Cannot read {}: {e}", path.trim()))
+    }
+
+    /// Writes the workspace as a collection file to `path` and says where.
+    pub fn export_workspace_to(&mut self, path: &str) -> Result<(), String> {
+        let text = nexus_http_core::import::export(&self.workspace);
+        std::fs::write(path.trim(), text).map_err(|e| format!("Export failed: {e}"))?;
+        self.notify(format!("Exported to {}", path.trim()));
+        Ok(())
+    }
+
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }

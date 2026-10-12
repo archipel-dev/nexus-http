@@ -92,6 +92,26 @@ impl Response {
         String::from_utf8_lossy(&self.body).into_owned()
     }
 
+    /// The file name to save this body under for the request `request_name`: the name with
+    /// everything but letters and digits as `-`, then `.response.json`, `.bin` or `.txt`.
+    pub fn file_name(&self, request_name: &str) -> String {
+        let stem: String = request_name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        let stem = if stem.is_empty() {
+            "response".to_owned()
+        } else {
+            stem
+        };
+        let ext = match self.body_kind() {
+            BodyKind::Json => "json",
+            BodyKind::Image | BodyKind::Binary => "bin",
+            _ => "txt",
+        };
+        format!("{stem}.response.{ext}")
+    }
+
     pub fn body_kind(&self) -> BodyKind {
         BodyKind::detect(self.content_type(), &self.body)
     }
@@ -238,6 +258,22 @@ mod tests {
             redirects: 0,
             started_at: 0,
         }
+    }
+
+    #[test]
+    fn file_names_follow_the_request_and_the_body() {
+        assert_eq!(
+            sample(b"{}", "application/json").file_name("List products"),
+            "List-products.response.json"
+        );
+        assert_eq!(
+            sample(&[0xff, 0xfe, 0], "").file_name("img/1"),
+            "img-1.response.bin"
+        );
+        assert_eq!(
+            sample(b"ok", "text/plain").file_name(""),
+            "response.response.txt"
+        );
     }
 
     #[test]

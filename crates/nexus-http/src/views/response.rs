@@ -10,8 +10,7 @@ use archipel_kit::behaviour::WidgetExt;
 use archipel_kit::components::code::{Json, PlainText, Xml};
 use archipel_kit::components::{
     Banner, Button, Cell, CodeView, Column, Dropdown, EmptyState, IconButton, ListRow, ProgressBar,
-    SectionHeader, SegmentedControl, Severity, Spinner, Table, Tag, TextField, Tooltip, TooltipExt,
-    VirtualList,
+    SectionHeader, Severity, Spinner, Table, Tag, TextField, Tooltip, TooltipExt, VirtualList,
 };
 use archipel_kit::tokens::size;
 use archipel_kit::{Glyph, Tone, egui};
@@ -88,6 +87,45 @@ impl TableState {
 /// Height left for a table's rows below its header.
 pub(crate) fn rows_height(ui: &Ui) -> f32 {
     (ui.available_height() - size::HEADER_HEIGHT).max(size::ROW_HEIGHT * 3.0)
+}
+
+/// The labels of the response's content tabs (Preview, Raw, Headers (6) …), shown in the
+/// tool window header; `None` while there is no HTTP response to show.
+/// Widest the history picker gets.
+const HISTORY_WIDTH: f32 = 250.0;
+
+pub fn tab_labels(state: &NexusState, id: &Id, local: &ResponseUi) -> Option<Vec<String>> {
+    let protocol = state
+        .workspace
+        .find_request(id)
+        .map(|(_, r)| r.protocol)
+        .unwrap_or_default();
+    if !protocol.is_http() {
+        return None;
+    }
+    let browsing = local.last_request.as_ref() == Some(id);
+    let (response, checks) = match local.history_index.filter(|_| browsing) {
+        Some(i) => (state.history.for_request(id).nth(i)?, None),
+        None => match state.outcomes.get(id) {
+            Some(Outcome::Response(r, checks)) => (r.as_ref(), Some(checks.as_slice())),
+            Some(Outcome::Error(_)) => return None,
+            None => (state.history.latest(id)?, None),
+        },
+    };
+    let cookies = response.headers_named("set-cookie").count();
+    let (passed, total) =
+        checks.map_or((0, 0), |c| (c.iter().filter(|c| c.passed).count(), c.len()));
+    Some(
+        ResponseTab::ALL
+            .iter()
+            .map(|tab| match tab {
+                ResponseTab::Headers => format!("{} ({})", tab.label(), response.headers.len()),
+                ResponseTab::Cookies if cookies > 0 => format!("{} ({cookies})", tab.label()),
+                ResponseTab::Tests if total > 0 => format!("{} ({passed}/{total})", tab.label()),
+                _ => tab.label().to_owned(),
+            })
+            .collect(),
+    )
 }
 
 pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi) {
@@ -202,27 +240,8 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi
         state.notify("Response body copied");
     }
     if save {
-        save_body(state, id, &response);
+        state.save_response_body(id, &response);
     }
-
-    let cookies = response.headers_named("set-cookie").count();
-    let passed = checks.iter().filter(|c| c.passed).count();
-    ui.horizontal(|ui| {
-        ui.add_space(size::CONTENT_INSET);
-        let options = ResponseTab::ALL.map(|tab| {
-            let label = match tab {
-                ResponseTab::Headers => format!("{} ({})", tab.label(), response.headers.len()),
-                ResponseTab::Cookies if cookies > 0 => format!("{} ({cookies})", tab.label()),
-                ResponseTab::Tests if !checks.is_empty() => {
-                    format!("{} ({passed}/{})", tab.label(), checks.len())
-                }
-                _ => tab.label().to_owned(),
-            };
-            (tab, label)
-        });
-        ui.add(SegmentedControl::new(&mut state.response_tab, options));
-    });
-    ui.add_space(6.0);
 
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(size::CONTENT_INSET as i8, 0))
@@ -241,28 +260,6 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi
             ResponseTab::Timeline => timeline(ui, &response, local),
             ResponseTab::Tests => tests(ui, &checks, local),
         });
-}
-
-fn save_body(state: &mut NexusState, id: &Id, response: &Response) {
-    let name = state
-        .workspace
-        .find_request(id)
-        .map(|(_, r)| r.name.clone())
-        .unwrap_or_else(|| "response".into());
-    let stem: String = name
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    let ext = match response.body_kind() {
-        BodyKind::Json => "json",
-        BodyKind::Image | BodyKind::Binary => "bin",
-        _ => "txt",
-    };
-    let path = state.base_dir().join(format!("{stem}.response.{ext}"));
-    match std::fs::write(&path, &response.body) {
-        Ok(()) => state.notify(format!("Saved {}", path.display())),
-        Err(e) => state.notify(format!("Could not save the response: {e}")),
-    }
 }
 
 fn idle(ui: &mut Ui) {
@@ -322,7 +319,7 @@ fn history_picker(ui: &mut Ui, state: &NexusState, id: &Id, local: &mut Response
     ui.add(
         Dropdown::new("response-history", &mut current, choices)
             .label("Response history")
-            .width(250.0),
+            .width(ui.available_width().min(HISTORY_WIDTH)),
     );
     if current.index != before {
         local.history_index = (current.index > 0).then_some(current.index);

@@ -238,11 +238,7 @@ impl Driver {
             ..Default::default()
         };
         let t = Instant::now();
-        let out = self.ctx.run(raw, |ctx| {
-            egui::CentralPanel::default()
-                .frame(egui::Frame::new())
-                .show(ctx, |ui| app.ui(ui));
-        });
+        let out = self.ctx.run(raw, |ctx| app.window(ctx));
         let _ = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         if self.record {
             self.times.push(t.elapsed());

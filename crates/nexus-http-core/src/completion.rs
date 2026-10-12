@@ -1,6 +1,6 @@
 //! Autocomplete for `{{ variables }}` and `{% tags %}` in template fields.
 
-use nexus_http_core::template;
+use crate::template;
 use serde_json::{Map, Value};
 
 /// The template expression being typed at the cursor.
@@ -130,6 +130,33 @@ fn preview(value: &Value) -> String {
     }
 }
 
+/// What completes at `cursor` (chars) in `text`: the chars `start..end` to replace (the
+/// open expression, and a closing `}}`/`%}` already typed after the cursor) and the
+/// ranked candidates. `None` when the cursor is not in an open expression.
+pub fn complete(
+    text: &str,
+    cursor: usize,
+    vars: &Map<String, Value>,
+) -> Option<(usize, usize, Vec<Item>)> {
+    let ctx = context_at(text, cursor)?;
+    let items = items(&ctx, vars);
+    Some((ctx.start, replaced_end(text, &ctx, cursor), items))
+}
+
+/// The end of the replaced part: the cursor, or after a closing `}}`/`%}` right behind it.
+fn replaced_end(text: &str, ctx: &Context, cursor: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let rest: String = chars[cursor..].iter().take(3).collect();
+    let rest_trim = rest.trim_start();
+    let close = if ctx.tag { "%}" } else { "}}" };
+    if rest_trim.starts_with(close) {
+        cursor + rest.chars().count() - rest_trim.chars().count() + 2
+    } else {
+        cursor
+    }
+}
+
 /// Applies `item` and returns the new text and cursor (chars).
 pub fn apply(text: &str, ctx: &Context, cursor: usize, item: &Item) -> (String, usize) {
     let chars: Vec<char> = text.chars().collect();
@@ -220,5 +247,25 @@ mod tests {
         );
         let ctx = context_at("{{ ho", 5).unwrap();
         assert_eq!(apply("{{ ho", &ctx, 5, &item), ("{{ host }}".into(), 10));
+    }
+}
+
+#[cfg(test)]
+mod complete_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn complete_replaces_a_closing_brace_behind_the_cursor() {
+        let vars = json!({"host": "x"})
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let (start, end, items) = complete("a{{ ho }}", 6, &vars).expect("open expression");
+        assert_eq!((start, end), (1, 9));
+        assert_eq!(items[0].insert, "{{ host }}");
+        let (_, end, _) = complete("{{ ho", 5, &vars).expect("open expression");
+        assert_eq!(end, 5);
+        assert!(complete("plain", 5, &vars).is_none());
     }
 }

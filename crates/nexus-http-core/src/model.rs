@@ -123,6 +123,13 @@ pub struct KeyValue {
     pub description: String,
 }
 
+impl Default for KeyValue {
+    /// An empty, enabled row.
+    fn default() -> Self {
+        Self::new("", "")
+    }
+}
+
 impl KeyValue {
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
