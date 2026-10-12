@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/archipel-dev/nexus-http/compare/v0.1.0...v0.1.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **dist:** one file per MSI component so the Windows installer builds ([#49](https://github.com/archipel-dev/nexus-http/issues/49)) ([97d9308](https://github.com/archipel-dev/nexus-http/commit/97d9308c0229b7a88f3f8c3141378b48c3c67249))
+
 ## 0.1.0 (2026-10-12)
 
 
