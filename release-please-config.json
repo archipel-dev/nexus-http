@@ -21,6 +21,7 @@
   "packages": {
     ".": {
       "package-name": "nexus-http",
+      "initial-version": "0.1.0",
       "extra-files": [
         {
           "type": "toml",
