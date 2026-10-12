@@ -240,7 +240,7 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi
         state.notify("Response body copied");
     }
     if save {
-        save_body(state, id, &response);
+        state.save_response_body(id, &response);
     }
 
     egui::Frame::new()
@@ -260,28 +260,6 @@ pub fn show(ui: &mut Ui, state: &mut NexusState, id: &Id, local: &mut ResponseUi
             ResponseTab::Timeline => timeline(ui, &response, local),
             ResponseTab::Tests => tests(ui, &checks, local),
         });
-}
-
-fn save_body(state: &mut NexusState, id: &Id, response: &Response) {
-    let name = state
-        .workspace
-        .find_request(id)
-        .map(|(_, r)| r.name.clone())
-        .unwrap_or_else(|| "response".into());
-    let stem: String = name
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    let ext = match response.body_kind() {
-        BodyKind::Json => "json",
-        BodyKind::Image | BodyKind::Binary => "bin",
-        _ => "txt",
-    };
-    let path = state.base_dir().join(format!("{stem}.response.{ext}"));
-    match std::fs::write(&path, &response.body) {
-        Ok(()) => state.notify(format!("Saved {}", path.display())),
-        Err(e) => state.notify(format!("Could not save the response: {e}")),
-    }
 }
 
 fn idle(ui: &mut Ui) {

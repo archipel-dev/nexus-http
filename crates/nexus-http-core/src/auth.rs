@@ -579,6 +579,67 @@ pub fn wait_for_redirect(listener: &TcpListener, timeout: Duration) -> Result<Ur
     }
 }
 
+/// How long [`fetch_token`] waits for the browser sign-in.
+pub const BROWSER_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Fetches a token for `config` (already template-rendered): the client credentials and
+/// password grants ask the token endpoint directly; the authorization code (with PKCE when
+/// enabled) and implicit grants listen on the loopback redirect URL, let `open_browser` show
+/// the sign-in page, and wait up to [`BROWSER_TIMEOUT`] for the redirect. Blocking: run it on
+/// a worker thread.
+pub fn fetch_token(
+    config: &OAuth2Config,
+    settings: crate::model::WorkspaceSettings,
+    open_browser: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<OAuth2Token, String> {
+    let client = crate::Client::new(settings);
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let request = match config.grant {
+        OAuth2Grant::ClientCredentials | OAuth2Grant::Password => {
+            token_request(config, None, None)?
+        }
+        OAuth2Grant::AuthorizationCode | OAuth2Grant::Implicit => {
+            let redirect = Url::parse(&config.redirect_url)
+                .map_err(|e| format!("invalid redirect URL: {e}"))?;
+            let host = redirect.host_str().unwrap_or("");
+            if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+                return Err("the redirect URL must point to 127.0.0.1 or localhost so nexus-http can receive the callback".into());
+            }
+            let port = redirect.port_or_known_default().unwrap_or(80);
+            let listener = TcpListener::bind(("127.0.0.1", port))
+                .map_err(|e| format!("cannot listen on port {port} for the redirect: {e}"))?;
+            let state = Pkce::new().verifier[..24].to_owned();
+            let pkce =
+                (config.grant == OAuth2Grant::AuthorizationCode && config.use_pkce).then(Pkce::new);
+            let url = authorization_url(config, &state, pkce.as_ref())?;
+            open_browser(url.as_str())?;
+            let redirected = wait_for_redirect(&listener, BROWSER_TIMEOUT)?;
+            if config.grant == OAuth2Grant::Implicit {
+                // Browsers do not send the fragment; providers that return the token in the
+                // query (some do) still work.
+                return token_from_implicit_redirect(&redirected, &state, unix_now())
+                    .map_err(|e| format!("{e} (the implicit grant returns the token in the URL fragment, which browsers do not send to the loopback listener; prefer Authorization Code with PKCE)"));
+            }
+            let code = code_from_redirect(&redirected, &state)?;
+            token_request(
+                config,
+                Some(&code),
+                pkce.as_ref().map(|p| p.verifier.as_str()),
+            )?
+        }
+    };
+    client
+        .fetch_oauth_token(&request, &cancel)
+        .map_err(|e| e.to_string())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

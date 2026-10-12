@@ -468,14 +468,9 @@ fn import_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut Overla
                         .width(width),
                 );
                 if ui.add(Button::secondary("Load file")).clicked() {
-                    match std::fs::read_to_string(local.import_path.trim()) {
+                    match NexusState::read_import_file(&local.import_path) {
                         Ok(text) => local.import_text = text,
-                        Err(e) => {
-                            local.import_result = Some(Err(format!(
-                                "Cannot read {}: {e}",
-                                local.import_path.trim()
-                            )));
-                        }
+                        Err(e) => local.import_result = Some(Err(e)),
                     }
                 }
             });
@@ -584,19 +579,13 @@ fn export_dialog(ctx: &egui::Context, state: &mut NexusState, local: &mut Overla
         .secondary("Cancel")
         .show(ctx);
     match action {
-        Some(DialogAction::Primary) => {
-            let text = import::export(&state.workspace);
-            match std::fs::write(local.export_path.trim(), text) {
-                Ok(()) => {
-                    state.notify(format!("Exported to {}", local.export_path.trim()));
-                    true
-                }
-                Err(e) => {
-                    local.export_error = Some(format!("Export failed: {e}"));
-                    false
-                }
+        Some(DialogAction::Primary) => match state.export_workspace_to(&local.export_path) {
+            Ok(()) => true,
+            Err(e) => {
+                local.export_error = Some(e);
+                false
             }
-        }
+        },
         Some(_) => true,
         None => false,
     }
