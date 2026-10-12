@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/archipel-dev/nexus-http/compare/v0.1.1...v0.1.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **ui:** bring back the main toolbar in the standalone window ([#51](https://github.com/archipel-dev/nexus-http/issues/51)) ([f265b35](https://github.com/archipel-dev/nexus-http/commit/f265b355047416af3141a201cfc2211ee2f3f65d))
+
 ## [0.1.1](https://github.com/archipel-dev/nexus-http/compare/v0.1.0...v0.1.1) (2026-10-12)
 
 
